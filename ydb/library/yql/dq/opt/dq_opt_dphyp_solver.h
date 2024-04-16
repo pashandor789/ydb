@@ -126,9 +126,9 @@ template <typename TNodeSet> ui32 TDPHypSolver<TNodeSet>::CountCC(ui32 budget) {
     return cost;
 }
 
-/**
- * Recursively count the nuber of items in the DP table of DPccp
-*/
+/*
+ * Recursively count the nuber of items in the DP table of DPHyp
+ */
 template <typename TNodeSet> ui32 TDPHypSolver<TNodeSet>::CountCCRec(const TNodeSet& s, const TNodeSet& x, ui32 cost, ui32 budget) {
     TNodeSet neighs = Neighs(s, x);
 

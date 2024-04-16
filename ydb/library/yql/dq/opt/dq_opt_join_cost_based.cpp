@@ -239,7 +239,8 @@ private:
         TJoinHypergraph<TNodeSet> hypergraph = MakeJoinHypergraph<TNodeSet>(joinTree);
         TDPHypSolver<TNodeSet> solver(hypergraph, this->Pctx);
 
-        if (solver.CountCC(MaxDPhypTableSize_) >= MaxDPhypTableSize_) {
+        /* Loop edges break DpHyp algorithm */
+        if (hypergraph.LoopEdgeExists() || solver.CountCC(MaxDPhypTableSize_) >= MaxDPhypTableSize_) {
             ComputeStatistics(joinTree, this->Pctx);
             return joinTree;
         }
