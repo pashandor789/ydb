@@ -367,15 +367,15 @@ namespace NKikimr {
                 BlobsToReplicatePtr = std::exchange(UnreplicatedBlobsPtr, std::make_shared<TBlobIdQueue>());
 
 #ifndef NDEBUG
-                Y_VERIFY_DEBUG_S(BlobsToReplicatePtr->size() == UnreplicatedBlobRecords.size(),
-                    "BlobsToReplicatePtr->size# " << BlobsToReplicatePtr->size()
+                Y_VERIFY_DEBUG_S(BlobsToReplicatePtr->GetNumItems() == UnreplicatedBlobRecords.size(),
+                    "BlobsToReplicatePtr->size# " << BlobsToReplicatePtr->GetNumItems()
                     << " UnreplicatedBlobRecords.size# " << UnreplicatedBlobRecords.size());
-                for (const TLogoBlobID& id : *BlobsToReplicatePtr) {
+                for (const TLogoBlobID& id : BlobsToReplicatePtr->Queue) {
                     Y_DEBUG_ABORT_UNLESS(UnreplicatedBlobRecords.contains(id));
                 }
 #endif
 
-                if (BlobsToReplicatePtr->empty()) {
+                if (BlobsToReplicatePtr->IsEmpty()) {
                     // no more blobs to replicate -- consider replication finished
                     finished = true;
                     for (const auto& donor : std::exchange(DonorQueue, {})) {
@@ -402,7 +402,7 @@ namespace NKikimr {
 
             if (finished) {
                 STLOG(PRI_DEBUG, BS_REPL, BSVR17, VDISKP(ReplCtx->VCtx->VDiskLogPrefix, "REPL COMPLETED"),
-                    (BlobsToReplicate, BlobsToReplicatePtr->size()));
+                    (BlobsToReplicate, BlobsToReplicatePtr->GetNumItems()));
                 LastReplEnd = now;
 
                 if (State == WaitQueues || State == Replication) {
@@ -412,7 +412,7 @@ namespace NKikimr {
                 ResetReplProgressTimer(true);
 
                 Become(&TThis::StateRelax);
-                if (!BlobsToReplicatePtr->empty()) {
+                if (!BlobsToReplicatePtr->IsEmpty()) {
                     // try again for unreplicated blobs in some future
                     State = Relaxation;
                     Schedule(ReplCtx->VDiskCfg->ReplTimeInterval, new TEvents::TEvWakeup);
@@ -425,8 +425,8 @@ namespace NKikimr {
                     // no more blobs to replicate; replication will not resume
                     State = Finished;
                     ReplCtx->MonGroup.ReplUnreplicatedVDisks() = 0;
-                    ReplCtx->MonGroup.ReplUnreplicatedPhantoms() = 1;
-                    ReplCtx->MonGroup.ReplUnreplicatedNonPhantoms() = 1;
+                    ReplCtx->MonGroup.ReplUnreplicatedPhantoms() = 0;
+                    ReplCtx->MonGroup.ReplUnreplicatedNonPhantoms() = 0;
                     ReplCtx->MonGroup.ReplWorkUnitsRemaining() = 0;
                     ReplCtx->MonGroup.ReplWorkUnitsDone() = 0;
                     ReplCtx->MonGroup.ReplItemsRemaining() = 0;

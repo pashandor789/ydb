@@ -507,13 +507,11 @@ private:
         bool enableKqpDataQueryStreamIdxLookupJoin = TableServiceConfig.GetEnableKqpDataQueryStreamIdxLookupJoin();
         bool enableKqpScanQueryStreamIdxLookupJoin = TableServiceConfig.GetEnableKqpScanQueryStreamIdxLookupJoin();
 
-        bool enableKqpDataQuerySourceRead = TableServiceConfig.GetEnableKqpDataQuerySourceRead();
         bool enableKqpScanQuerySourceRead = TableServiceConfig.GetEnableKqpScanQuerySourceRead();
 
         bool predicateExtract20 = TableServiceConfig.GetPredicateExtract20();
 
         bool defaultSyntaxVersion = TableServiceConfig.GetSqlVersion();
-        bool enableKqpImmediateEffects = TableServiceConfig.GetEnableKqpImmediateEffects();
 
         auto indexAutoChooser = TableServiceConfig.GetIndexAutoChooseMode();
 
@@ -531,6 +529,7 @@ private:
         auto mkqlHeavyLimit = TableServiceConfig.GetResourceManager().GetMkqlHeavyProgramMemoryLimit();
 
         bool enableQueryServiceSpilling = TableServiceConfig.GetEnableQueryServiceSpilling();
+        ui64 defaultCostBasedOptimizationLevel = TableServiceConfig.GetDefaultCostBasedOptimizationLevel();
 
         TableServiceConfig.Swap(event.MutableConfig()->MutableTableServiceConfig());
         LOG_INFO(*TlsActivationContext, NKikimrServices::KQP_COMPILE_SERVICE, "Updated config");
@@ -543,10 +542,8 @@ private:
             TableServiceConfig.GetEnableKqpScanQueryStreamLookup() != enableKqpScanQueryStreamLookup ||
             TableServiceConfig.GetEnableKqpScanQueryStreamIdxLookupJoin() != enableKqpScanQueryStreamIdxLookupJoin ||
             TableServiceConfig.GetEnableKqpDataQueryStreamIdxLookupJoin() != enableKqpDataQueryStreamIdxLookupJoin ||
-            TableServiceConfig.GetEnableKqpDataQuerySourceRead() != enableKqpDataQuerySourceRead ||
             TableServiceConfig.GetEnableKqpScanQuerySourceRead() != enableKqpScanQuerySourceRead ||
             TableServiceConfig.GetPredicateExtract20() != predicateExtract20 ||
-            TableServiceConfig.GetEnableKqpImmediateEffects() != enableKqpImmediateEffects ||
             TableServiceConfig.GetIndexAutoChooseMode() != indexAutoChooser ||
             TableServiceConfig.GetEnableSequences() != enableSequences ||
             TableServiceConfig.GetEnableColumnsWithDefault() != enableColumnsWithDefault ||
@@ -558,7 +555,8 @@ private:
             TableServiceConfig.GetExtractPredicateRangesLimit() != rangesLimit ||
             TableServiceConfig.GetResourceManager().GetMkqlHeavyProgramMemoryLimit() != mkqlHeavyLimit ||
             TableServiceConfig.GetIdxLookupJoinPointsLimit() != idxLookupPointsLimit ||
-            TableServiceConfig.GetEnableQueryServiceSpilling() != enableQueryServiceSpilling) {
+            TableServiceConfig.GetEnableQueryServiceSpilling() != enableQueryServiceSpilling ||
+            TableServiceConfig.GetDefaultCostBasedOptimizationLevel() != defaultCostBasedOptimizationLevel) {
 
             QueryCache.Clear();
 
