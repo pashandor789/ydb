@@ -41,7 +41,7 @@ void PackStatisticsToProtobuf(google::protobuf::RepeatedPtrField<FederatedQuery:
                               std::string_view statsStr,
                               TDuration executionTime);
 
-using StatsValuesList = std::vector<std::pair<TString, ui64>>;
+using StatsValuesList = std::vector<std::pair<TString, i64>>;
 
 StatsValuesList ExtractStatisticsFromProtobuf(const google::protobuf::RepeatedPtrField<FederatedQuery::Internal::StatisticsNamedValue>& statsProto);
 
@@ -52,5 +52,7 @@ struct Statistics {
 };
 
 TStringBuilder& operator<<(TStringBuilder& builder, const Statistics& statistics);
+
+void AddTransientIssues(::google::protobuf::RepeatedPtrField< ::Ydb::Issue::IssueMessage>* protoIssues, NYql::TIssues&& issues);
 
 };

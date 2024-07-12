@@ -53,7 +53,6 @@ typedef struct
 
 static int32 network_cmp_internal(inet *a1, inet *a2);
 static int	network_fast_cmp(Datum x, Datum y, SortSupport ssup);
-static int	network_cmp_abbrev(Datum x, Datum y, SortSupport ssup);
 static bool network_abbrev_abort(int memtupcount, SortSupport ssup);
 static Datum network_abbrev_convert(Datum original, SortSupport ssup);
 static List *match_network_function(Node *leftop,
@@ -456,7 +455,7 @@ network_sortsupport(PG_FUNCTION_ARGS)
 
 		ssup->ssup_extra = uss;
 
-		ssup->comparator = network_cmp_abbrev;
+		ssup->comparator = ssup_datum_unsigned_cmp;
 		ssup->abbrev_converter = network_abbrev_convert;
 		ssup->abbrev_abort = network_abbrev_abort;
 		ssup->abbrev_full_comparator = network_fast_cmp;
@@ -477,20 +476,6 @@ network_fast_cmp(Datum x, Datum y, SortSupport ssup)
 	inet	   *arg2 = DatumGetInetPP(y);
 
 	return network_cmp_internal(arg1, arg2);
-}
-
-/*
- * Abbreviated key comparison func
- */
-static int
-network_cmp_abbrev(Datum x, Datum y, SortSupport ssup)
-{
-	if (x > y)
-		return 1;
-	else if (x == y)
-		return 0;
-	else
-		return -1;
 }
 
 /*
@@ -1889,7 +1874,7 @@ inetnot(PG_FUNCTION_ARGS)
 		unsigned char *pip = ip_addr(ip);
 		unsigned char *pdst = ip_addr(dst);
 
-		while (nb-- > 0)
+		while (--nb >= 0)
 			pdst[nb] = ~pip[nb];
 	}
 	ip_bits(dst) = ip_bits(ip);
@@ -1921,7 +1906,7 @@ inetand(PG_FUNCTION_ARGS)
 		unsigned char *pip2 = ip_addr(ip2);
 		unsigned char *pdst = ip_addr(dst);
 
-		while (nb-- > 0)
+		while (--nb >= 0)
 			pdst[nb] = pip[nb] & pip2[nb];
 	}
 	ip_bits(dst) = Max(ip_bits(ip), ip_bits(ip2));
@@ -1953,7 +1938,7 @@ inetor(PG_FUNCTION_ARGS)
 		unsigned char *pip2 = ip_addr(ip2);
 		unsigned char *pdst = ip_addr(dst);
 
-		while (nb-- > 0)
+		while (--nb >= 0)
 			pdst[nb] = pip[nb] | pip2[nb];
 	}
 	ip_bits(dst) = Max(ip_bits(ip), ip_bits(ip2));
@@ -1978,7 +1963,7 @@ internal_inetpl(inet *ip, int64 addend)
 		unsigned char *pdst = ip_addr(dst);
 		int			carry = 0;
 
-		while (nb-- > 0)
+		while (--nb >= 0)
 		{
 			carry = pip[nb] + (int) (addend & 0xFF) + carry;
 			pdst[nb] = (unsigned char) (carry & 0xFF);
@@ -2062,7 +2047,7 @@ inetmi(PG_FUNCTION_ARGS)
 		unsigned char *pip2 = ip_addr(ip2);
 		int			carry = 1;
 
-		while (nb-- > 0)
+		while (--nb >= 0)
 		{
 			int			lobyte;
 

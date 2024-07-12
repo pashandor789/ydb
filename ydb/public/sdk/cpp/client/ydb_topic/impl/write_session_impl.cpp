@@ -1,8 +1,7 @@
 #include "write_session_impl.h"
 
-#include <ydb/public/sdk/cpp/client/ydb_topic/impl/log_lazy.h>
-#include <ydb/public/sdk/cpp/client/ydb_topic/impl/trace_lazy.h>
-#include <ydb/public/sdk/cpp/client/ydb_topic/topic.h>
+#include <ydb/public/sdk/cpp/client/ydb_topic/common/log_lazy.h>
+#include <ydb/public/sdk/cpp/client/ydb_topic/common/trace_lazy.h>
 
 #include <library/cpp/string_utils/url/url.h>
 
@@ -19,6 +18,34 @@ namespace NYdb::NTopic {
 const TDuration UPDATE_TOKEN_PERIOD = TDuration::Hours(1);
 // Error code from file ydb/public/api/protos/persqueue_error_codes_v1.proto
 const ui64 WRITE_ERROR_PARTITION_INACTIVE = 500029;
+
+namespace {
+
+using TTxId = std::pair<std::string_view, std::string_view>;
+using TTxIdOpt = std::optional<TTxId>;
+
+TTxIdOpt GetTransactionId(const Ydb::Topic::StreamWriteMessage_WriteRequest& request)
+{
+    Y_ABORT_UNLESS(request.messages_size());
+
+    if (!request.has_tx()) {
+        return std::nullopt;
+    }
+
+    const Ydb::Topic::TransactionIdentity& tx = request.tx();
+    return TTxId(tx.session(), tx.id());
+}
+
+TTxIdOpt GetTransactionId(const NTable::TTransaction* tx)
+{
+    if (!tx) {
+        return std::nullopt;
+    }
+
+    return TTxId(tx->GetSession().GetId(), tx->GetId());
+}
+
+}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // TWriteSessionImpl
@@ -72,24 +99,22 @@ void TWriteSessionImpl::Start(const TDuration& delay) {
         EventsQueue = std::make_shared<TWriteSessionEventsQueue>(Settings);
     }
 
-    ++ConnectionAttemptsDone;
     if (!Started) {
         with_lock(Lock) {
             HandleWakeUpImpl();
         }
         InitWriter();
     }
-    Started = true;
-    if (Settings.DirectWriteToPartition_ && (Settings.PartitionId_.Defined() || DirectWriteToPartitionId.Defined())) {
-        with_lock (Lock) {
+    with_lock (Lock) {
+        ++ConnectionAttemptsDone;
+        Started = true;
+        if (Settings.DirectWriteToPartition_ && (Settings.PartitionId_.Defined() || DirectWriteToPartitionId.Defined())) {
             PreferredPartitionLocation = {};
-            return ConnectToPreferredPartitionLocation(delay);
+            ConnectToPreferredPartitionLocation(delay);
+            return;
         }
     }
-    else
-    {
-        return Connect(delay);
-    }
+    Connect(delay);
 }
 
 // Returns true if we need to switch to another DirectWriteToPartitionId.
@@ -206,6 +231,8 @@ void TWriteSessionImpl::ConnectToPreferredPartitionLocation(const TDuration& del
         AbortImpl();
         return;
     }
+
+    ++ConnectionGeneration;
 
     prevDescribePartitionContext = std::exchange(DescribePartitionContext, describePartitionContext);
     Y_ASSERT(DescribePartitionContext);
@@ -576,6 +603,10 @@ void TWriteSessionImpl::Connect(const TDuration& delay) {
         }
         Cancel(prevConnectTimeoutContext);
 
+        if (Processor) {
+            Processor->Cancel();
+        }
+
         reqSettings = TRpcRequestSettings::Make(Settings, PreferredPartitionLocation.Endpoint);
 
         connectCallback = [cbContext = SelfContext,
@@ -796,6 +827,11 @@ void TWriteSessionImpl::OnReadDone(NYdbGrpc::TGrpcStatus&& grpcStatus, size_t co
             }
         }
     }
+
+    for (auto& event : processResult.Events) {
+        EventsQueue->PushEvent(std::move(event));
+    }
+
     if (doRead)
         ReadFromProcessor();
 
@@ -808,9 +844,6 @@ void TWriteSessionImpl::OnReadDone(NYdbGrpc::TGrpcStatus&& grpcStatus, size_t co
         if (processResult.HandleResult.DoStop) {
             CloseImpl(std::move(errorStatus));
         }
-    }
-    for (auto& event : processResult.Events) {
-        EventsQueue->PushEvent(std::move(event));
     }
     if (needSetValue) {
         InitSeqNoPromise.SetValue(*processResult.InitSeqNo);
@@ -1270,20 +1303,36 @@ void TWriteSessionImpl::UpdateTokenIfNeededImpl() {
 
     LOG_LAZY(DbDriverState->Log, TLOG_DEBUG, LogPrefix() << "Write session: try to update token");
 
-    if (!DbDriverState->CredentialsProvider || UpdateTokenInProgress || !SessionEstablished)
+    if (!DbDriverState->CredentialsProvider || UpdateTokenInProgress || !SessionEstablished) {
         return;
-    TClientMessage clientMessage;
-    auto* updateRequest = clientMessage.mutable_update_token_request();
+    }
+
     auto token = DbDriverState->CredentialsProvider->GetAuthInfo();
-    if (token == PrevToken)
+    if (token == PrevToken) {
         return;
-    UpdateTokenInProgress = true;
-    updateRequest->set_token(token);
-    PrevToken = token;
+    }
 
     LOG_LAZY(DbDriverState->Log, TLOG_DEBUG, LogPrefix() << "Write session: updating token");
 
+    UpdateTokenInProgress = true;
+    PrevToken = token;
+
+    TClientMessage clientMessage;
+    clientMessage.mutable_update_token_request()->set_token(token);
     Processor->Write(std::move(clientMessage));
+}
+
+bool TWriteSessionImpl::TxIsChanged(const Ydb::Topic::StreamWriteMessage_WriteRequest* writeRequest) const
+{
+    Y_ABORT_UNLESS(writeRequest);
+
+    if (!writeRequest->messages_size()) {
+        return false;
+    }
+
+    Y_ABORT_UNLESS(!OriginalMessagesToSend.empty());
+
+    return GetTransactionId(*writeRequest) != GetTransactionId(OriginalMessagesToSend.front().Tx);
 }
 
 void TWriteSessionImpl::SendImpl() {
@@ -1299,6 +1348,9 @@ void TWriteSessionImpl::SendImpl() {
             const auto& block = PackedMessagesToSend.top();
             Y_ABORT_UNLESS(block.Valid);
             if (writeRequest->messages_size() > 0 && prevCodec != block.CodecID) {
+                break;
+            }
+            if (TxIsChanged(writeRequest)) {
                 break;
             }
             prevCodec = block.CodecID;

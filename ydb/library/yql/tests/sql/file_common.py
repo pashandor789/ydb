@@ -13,7 +13,7 @@ from yql_utils import execute_sql, get_supported_providers, get_tables, get_file
     get_pragmas, log, KSV_ATTR, is_xfail, get_param, YQLExecResult, yql_binary_path
 from yqlrun import YQLRun
 
-from utils import get_config, get_parameters_json, DATA_PATH
+from utils import get_config, get_parameters_json, DATA_PATH, replace_vars
 
 
 def get_gateways_config(http_files, yql_http_file_server, force_blocks=False, is_hybrid=False):
@@ -74,14 +74,16 @@ def get_sql_query(provider, suite, case, config):
     sql_query = ';\n'.join(pragmas)
     if 'Python' in sql_query or 'Javascript' in sql_query:
         pytest.skip('ScriptUdf')
+
+    assert 'UseBlocks' not in sql_query, 'UseBlocks should not be used directly, only via ForceBlocks'
     
     return sql_query
-
 
 def run_file_no_cache(provider, suite, case, cfg, config, yql_http_file_server, yqlrun_binary=None, extra_args=[], force_blocks=False):
     check_provider(provider, config)
 
     sql_query = get_sql_query(provider, suite, case, config)
+    sql_query = replace_vars(sql_query, "yqlrun_var")
 
     xfail = is_xfail(config)
 

@@ -39,6 +39,10 @@ FederatedQuery::IamAuth::IdentityCase GetIamAuth(const FederatedQuery::Connectio
             return setting.monitoring().auth().identity_case();
         case FederatedQuery::ConnectionSetting::kPostgresqlCluster:
             return setting.postgresql_cluster().auth().identity_case();
+        case FederatedQuery::ConnectionSetting::kGreenplumCluster:
+            return setting.greenplum_cluster().auth().identity_case();
+        case FederatedQuery::ConnectionSetting::kMysqlCluster:
+            return setting.mysql_cluster().auth().identity_case();
         case FederatedQuery::ConnectionSetting::CONNECTION_NOT_SET:
             return FederatedQuery::IamAuth::IDENTITY_NOT_SET;
     }
@@ -884,7 +888,12 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyQuery
             // TODO: move to run actor priority selection
             TSet<TString> disabledConnections;
             for (const auto& connection: GetEntities<FederatedQuery::Connection>(resultSets[resultSets.size() - 3], CONNECTION_COLUMN_NAME, Config->Proto.GetIgnorePrivateSources(), commonCounters)) {
-                if (!Config->AvailableConnections.contains(connection.content().setting().connection_case())) {
+                auto connectionCase = connection.content().setting().connection_case();
+                if (!Config->AvailableConnections.contains(connectionCase)) {
+                    disabledConnections.insert(connection.meta().id());
+                    continue;
+                }
+                if ((query.content().type() == FederatedQuery::QueryContent::STREAMING) && !Config->AvailableStreamingConnections.contains(connectionCase)) {
                     disabledConnections.insert(connection.meta().id());
                     continue;
                 }

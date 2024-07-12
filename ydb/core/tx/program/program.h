@@ -2,7 +2,7 @@
 
 #include "registry.h" 
 #include <ydb/core/protos/flat_scheme_op.pb.h>
-#include <ydb/core/protos/ssa.pb.h>
+#include <ydb/core/formats/arrow/protos/ssa.pb.h>
 #include <ydb/core/formats/arrow/program.h>
 #include <ydb/core/formats/arrow/custom_registry.h>
 #include <ydb/core/tablet_flat/flat_dbase_scheme.h>
@@ -95,7 +95,7 @@ public:
         if (Program) {
             return Program->ApplyTo(batch, NArrow::GetCustomExecContext());
         } else if (OverrideProcessingColumnsVector) {
-            batch = NArrow::ExtractColumnsValidate(batch, *OverrideProcessingColumnsVector);
+            batch = NArrow::TColumnOperator().VerifyIfAbsent().Extract(batch, *OverrideProcessingColumnsVector);
         }
         return arrow::Status::OK();
     }

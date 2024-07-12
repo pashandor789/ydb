@@ -91,10 +91,11 @@ struct TReplicationCardFetchOptions
 
     operator size_t() const;
     bool operator == (const TReplicationCardFetchOptions& other) const = default;
+
+    bool Contains(const TReplicationCardFetchOptions& other) const;
 };
 
 void FormatValue(TStringBuilderBase* builder, const TReplicationCardFetchOptions& options, TStringBuf /*spec*/);
-TString ToString(const TReplicationCardFetchOptions& options);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -103,17 +104,14 @@ void FormatValue(
     const TReplicationProgress& replicationProgress,
     TStringBuf /*spec*/,
     std::optional<TReplicationProgressProjection> replicationProgressProjection = std::nullopt);
-TString ToString(const TReplicationProgress& replicationProgress);
 
 void FormatValue(TStringBuilderBase* builder, const TReplicaHistoryItem& replicaHistoryItem, TStringBuf /*spec*/);
-TString ToString(const TReplicaHistoryItem& replicaHistoryItem);
 
 void FormatValue(
     TStringBuilderBase* builder,
     const TReplicaInfo& replicaInfo,
     TStringBuf /*spec*/,
     std::optional<TReplicationProgressProjection> replicationProgressProjection = std::nullopt);
-TString ToString(const TReplicaInfo& replicaInfo);
 
 void FormatValue(
     TStringBuilderBase* builder,
@@ -133,7 +131,7 @@ bool IsReplicaDisabled(NTabletClient::ETableReplicaState state);
 bool IsReplicaReallySync(
     NTabletClient::ETableReplicaMode mode,
     NTabletClient::ETableReplicaState state,
-    const TReplicaHistoryItem& lastReplicaHistoryItem);
+    const std::vector<TReplicaHistoryItem>& replicaHistory);
 NTabletClient::ETableReplicaMode GetTargetReplicaMode(NTabletClient::ETableReplicaMode mode);
 NTabletClient::ETableReplicaState GetTargetReplicaState(NTabletClient::ETableReplicaState state);
 

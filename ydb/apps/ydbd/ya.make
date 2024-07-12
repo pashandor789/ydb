@@ -1,5 +1,7 @@
 PROGRAM(ydbd)
 
+NO_EXPORT_DYNAMIC_SYMBOLS()
+
 IF (OS_LINUX)
     ALLOCATOR(TCMALLOC_256K)
 ENDIF()
@@ -72,9 +74,7 @@ PEERDIR(
 CHECK_DEPENDENT_DIRS(
     ALLOW_ONLY
     PEERDIRS
-    arc/api/public
-    build/internal/platform
-    build/platform
+    build
     certs
     contrib
     library

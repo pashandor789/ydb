@@ -1,42 +1,21 @@
 #include "table.h"
+#include <ydb/core/tx/schemeshard/olap/operations/alter/abstract/object.h>
+#include <ydb/core/tx/schemeshard/olap/operations/alter/standalone/object.h>
+#include <ydb/core/tx/schemeshard/olap/operations/alter/in_store/object.h>
+#include <ydb/core/tx/columnshard/common/protos/snapshot.pb.h>
 
 namespace NKikimr::NSchemeShard {
 
 TColumnTableInfo::TColumnTableInfo(
     ui64 alterVersion,
-    NKikimrSchemeOp::TColumnTableDescription&& description,
-    NKikimrSchemeOp::TColumnTableSharding&& sharding,
+    const NKikimrSchemeOp::TColumnTableDescription& description,
     TMaybe<NKikimrSchemeOp::TColumnStoreSharding>&& standaloneSharding,
     TMaybe<NKikimrSchemeOp::TAlterColumnTable>&& alterBody)
     : AlterVersion(alterVersion)
-    , Description(std::move(description))
-    , Sharding(std::move(sharding))
+    , Description(description)
     , StandaloneSharding(std::move(standaloneSharding))
-    , AlterBody(std::move(alterBody)) {
-    if (Description.HasColumnStorePathId()) {
-        OlapStorePathId = TPathId(
-            TOwnerId(Description.GetColumnStorePathId().GetOwnerId()),
-            TLocalPathId(Description.GetColumnStorePathId().GetLocalId()));
-    }
-
-    if (Description.HasSchema()) {
-        TOlapSchema schema;
-        schema.ParseFromLocalDB(Description.GetSchema());
-    }
-
-    ColumnShards.reserve(Sharding.GetColumnShards().size());
-    for (ui64 columnShard : Sharding.GetColumnShards()) {
-        ColumnShards.push_back(columnShard);
-    }
-
-    if (StandaloneSharding) {
-        OwnedColumnShards.reserve(StandaloneSharding->GetColumnShards().size());
-        for (const auto& shardIdx : StandaloneSharding->GetColumnShards()) {
-            OwnedColumnShards.push_back(TShardIdx(
-                TOwnerId(shardIdx.GetOwnerId()),
-                TLocalShardIdx(shardIdx.GetLocalId())));
-        }
-    }
+    , AlterBody(std::move(alterBody))
+{
 }
 
 TColumnTableInfo::TPtr TColumnTableInfo::BuildTableWithAlter(const TColumnTableInfo& initialTable, const NKikimrSchemeOp::TAlterColumnTable& alterBody) {
@@ -44,6 +23,20 @@ TColumnTableInfo::TPtr TColumnTableInfo::BuildTableWithAlter(const TColumnTableI
     alterData->AlterBody.ConstructInPlace(alterBody);
     ++alterData->AlterVersion;
     return alterData;
+}
+
+TConclusion<std::shared_ptr<NOlap::NAlter::ISSEntity>> TColumnTableInfo::BuildEntity(const TPathId& pathId, const NOlap::NAlter::TEntityInitializationContext& iContext) const {
+    std::shared_ptr<NOlap::NAlter::ISSEntity> result;
+    if (IsStandalone()) {
+        result = std::make_shared<NOlap::NAlter::TStandaloneTable>(pathId);
+    } else {
+        result = std::make_shared<NOlap::NAlter::TInStoreTable>(pathId);
+    }
+    auto initConclusion = result->Initialize(iContext);
+    if (initConclusion.IsFail()) {
+        return initConclusion;
+    }
+    return result;
 }
 
 }

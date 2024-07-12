@@ -48,7 +48,7 @@ TFirstLastSpecialKeys::TFirstLastSpecialKeys(const std::shared_ptr<arrow::Record
     Y_ABORT_UNLESS(batch->num_rows());
     std::shared_ptr<arrow::RecordBatch> keyBatch = batch;
     if (columnNames.size()) {
-        keyBatch = NArrow::ExtractColumns(batch, columnNames);
+        keyBatch = NArrow::TColumnOperator().VerifyIfAbsent().Extract(batch, columnNames);
     }
     std::vector<ui64> indexes = {0};
     if (batch->num_rows() > 1) {
@@ -64,15 +64,15 @@ TMinMaxSpecialKeys::TMinMaxSpecialKeys(std::shared_ptr<arrow::RecordBatch> batch
     Y_ABORT_UNLESS(batch->num_rows());
     Y_ABORT_UNLESS(schema);
 
-    NMerger::TSortableBatchPosition record(batch, 0, schema->field_names(), {}, false);
-    std::optional<NMerger::TSortableBatchPosition> minValue;
-    std::optional<NMerger::TSortableBatchPosition> maxValue;
+    NMerger::TRWSortableBatchPosition record(batch, 0, schema->field_names(), {}, false);
+    std::optional<NMerger::TCursor> minValue;
+    std::optional<NMerger::TCursor> maxValue;
     while (true) {
-        if (!minValue || minValue->Compare(record) == std::partial_ordering::greater) {
-            minValue = record;
+        if (!minValue || record.Compare(*minValue) == std::partial_ordering::less) {
+            minValue = record.BuildSortingCursor();
         }
-        if (!maxValue || maxValue->Compare(record) == std::partial_ordering::less) {
-            maxValue = record;
+        if (!maxValue || record.Compare(*maxValue) == std::partial_ordering::greater) {
+            maxValue = record.BuildSortingCursor();
         }
         if (!record.NextPosition(1)) {
             break;
@@ -90,7 +90,7 @@ TMinMaxSpecialKeys::TMinMaxSpecialKeys(std::shared_ptr<arrow::RecordBatch> batch
         columnNamesString.emplace_back(i);
     }
 
-    auto dataBatch = NArrow::ExtractColumns(batch, columnNamesString);
+    auto dataBatch = NArrow::TColumnOperator().VerifyIfAbsent().Extract(batch, columnNamesString);
     Data = NArrow::CopyRecords(dataBatch, indexes);
     Y_ABORT_UNLESS(Data->num_rows() == 1 || Data->num_rows() == 2);
 }
@@ -102,8 +102,7 @@ TFirstLastSpecialKeys::TFirstLastSpecialKeys(const TString& data)
 }
 
 std::shared_ptr<NKikimr::NArrow::TFirstLastSpecialKeys> TFirstLastSpecialKeys::BuildAccordingToSchemaVerified(const std::shared_ptr<arrow::Schema>& schema) const {
-    auto newData = NArrow::ExtractColumns(Data, schema);
-    AFL_VERIFY(newData);
+    auto newData = NArrow::TColumnOperator().Adapt(Data, schema).DetachResult();
     return std::make_shared<TFirstLastSpecialKeys>(newData);
 }
 
@@ -115,10 +114,8 @@ TMinMaxSpecialKeys::TMinMaxSpecialKeys(const TString& data)
 }
 
 std::shared_ptr<NKikimr::NArrow::TMinMaxSpecialKeys> TMinMaxSpecialKeys::BuildAccordingToSchemaVerified(const std::shared_ptr<arrow::Schema>& schema) const {
-    auto newData = NArrow::ExtractColumns(Data, schema);
-    AFL_VERIFY(newData);
-    std::shared_ptr<TMinMaxSpecialKeys> result(new TMinMaxSpecialKeys(newData));
-    return result;
+    auto newData = NArrow::TColumnOperator().Adapt(Data, schema).DetachResult();
+    return std::shared_ptr<TMinMaxSpecialKeys>(new TMinMaxSpecialKeys(newData));
 }
 
 }

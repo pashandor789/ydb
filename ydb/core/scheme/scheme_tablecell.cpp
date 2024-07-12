@@ -136,13 +136,15 @@ namespace {
         SerializeCellVecBody(cells, resultBufferData, resultCells);
     }
 
+    constexpr size_t CellMatrixHeaderSize = sizeof(ui32) + sizeof(ui16);
+
     Y_FORCE_INLINE void SerializeCellMatrix(TConstArrayRef<TCell> cells, ui32 rowCount, ui16 colCount, TString& resultBuffer, TVector<TCell>* resultCells) {
         Y_ABORT_UNLESS(cells.size() == (size_t)rowCount * (size_t)colCount);
 
         if (!SerializeCellVecInit(cells, resultBuffer, resultCells))
             return;
 
-        size_t size = sizeof(ui32) + sizeof(ui16);
+        size_t size = CellMatrixHeaderSize;
         for (auto& cell : cells)
             size += sizeof(TCellHeader) + cell.Size();
 
@@ -347,13 +349,7 @@ size_t TOwnedCellVecBatch::Append(TConstArrayRef<TCell> cells) {
         return 0;
     }
 
-    size_t size = sizeof(TCell) * cellsSize;
-    for (auto& cell : cells) {
-        if (!cell.IsNull() && !cell.IsInline()) {
-            const size_t cellSize = cell.Size();
-            size += AlignUp(cellSize);
-        }
-    }
+    size_t size = EstimateSize(cells);
 
     char * allocatedBuffer = reinterpret_cast<char *>(Pool->Allocate(size));
 
@@ -455,6 +451,14 @@ TString DbgPrintTuple(const TDbTupleRef& row, const NScheme::TTypeRegistry& type
     }
     res += ")";
     return res;
+}
+
+size_t GetCellMatrixHeaderSize() {
+    return CellMatrixHeaderSize;
+}
+
+size_t GetCellHeaderSize() {
+    return sizeof(TCellHeader);
 }
 
 } // namespace NKikimr

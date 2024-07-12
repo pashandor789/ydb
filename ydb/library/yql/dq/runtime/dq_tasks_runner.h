@@ -139,6 +139,7 @@ public:
     virtual IDqChannelStorage::TPtr CreateChannelStorage(ui64 channelId, bool withSpilling, NActors::TActorSystem* actorSystem) const = 0;
 
     virtual std::function<void()> GetWakeupCallback() const = 0;
+    virtual TTxId GetTxId() const = 0;
 };
 
 class TDqTaskRunnerExecutionContextBase : public IDqTaskRunnerExecutionContext {
@@ -161,6 +162,10 @@ public:
     };
 
     std::function<void()> GetWakeupCallback() const override {
+        return {};
+    }
+
+    TTxId GetTxId() const override {
         return {};
     }
 
@@ -347,6 +352,10 @@ public:
         return Task_->GetRequestContext();
     }
 
+    bool GetEnableSpilling() const {
+        return Task_->HasEnableSpilling() && Task_->GetEnableSpilling();
+    }
+
 private:
 
     // external callback to retrieve parameter value.
@@ -405,7 +414,7 @@ public:
 };
 
 TIntrusivePtr<IDqTaskRunner> MakeDqTaskRunner(
-    NKikimr::NMiniKQL::TScopedAlloc& alloc, 
+    std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc, 
     const TDqTaskRunnerContext& ctx, 
     const TDqTaskRunnerSettings& settings,
     const TLogFunc& logFunc

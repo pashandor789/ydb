@@ -28,7 +28,7 @@ public:
 
 public:
     TComparator() = default;
-    TComparator(std::vector<ESortOrder> sortOrders, TCallback<TUUComparerSignature> CGComparator = {});
+    explicit TComparator(std::vector<ESortOrder> sortOrders, TCallback<TUUComparerSignature> cgComparator = {});
 
     void Persist(const TPersistenceContext& context);
 
@@ -94,7 +94,6 @@ private:
 };
 
 void FormatValue(TStringBuilderBase* builder, const TComparator& comparator, TStringBuf spec);
-TString ToString(const TComparator& comparator);
 
 void Serialize(const TComparator& comparator, NYson::IYsonConsumer* consumer);
 

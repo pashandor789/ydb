@@ -1,5 +1,6 @@
 RECURSE(
     actorlib_impl
+    backup
     base
     blob_depot
     blobstorage
@@ -42,10 +43,10 @@ RECURSE(
     node_whiteboard
     persqueue
     pgproxy
-    protos
     public_http
     quoter
     raw_socket
+    resource_pools
     scheme
     scheme_types
     security

@@ -1,6 +1,6 @@
 items:
 - { name: Обзор,                                  href: index.md }
-- { name: Термины и определения,                  href: databases.md }
+- { name: Глоссарий,                  href: glossary.md }
 - { name: Соединение с БД,       href: connect.md }
 - name: Аутентификация
   href: auth.md
@@ -19,6 +19,8 @@ items:
   items:
   - name: Обзор
     href: cluster/index.md
+  - name: Топология
+    href: topology.md
   - name: Общая схема YDB
     href: cluster/common_scheme_ydb.md
   - name: Дисковая подсистема кластера

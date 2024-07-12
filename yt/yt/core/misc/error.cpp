@@ -64,34 +64,29 @@ void FormatValue(TStringBuilderBase* builder, TErrorCode code, TStringBuf spec)
     FormatValue(builder, static_cast<int>(code), spec);
 }
 
-TString ToString(TErrorCode code)
-{
-    return ToStringViaBuilder(code);
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 
-YT_THREAD_LOCAL(bool) ErrorSanitizerEnabled = false;
-YT_THREAD_LOCAL(TInstant) ErrorSanitizerDatetimeOverride = {};
-YT_THREAD_LOCAL(TSharedRef) ErrorSanitizerLocalHostNameOverride = {};
+YT_DEFINE_THREAD_LOCAL(bool, ErrorSanitizerEnabled, false);
+YT_DEFINE_THREAD_LOCAL(TInstant, ErrorSanitizerDatetimeOverride);
+YT_DEFINE_THREAD_LOCAL(TSharedRef, ErrorSanitizerLocalHostNameOverride);
 
 TErrorSanitizerGuard::TErrorSanitizerGuard(TInstant datetimeOverride, TSharedRef localHostNameOverride)
-    : SavedEnabled_(ErrorSanitizerEnabled)
-    , SavedDatetimeOverride_(GetTlsRef(ErrorSanitizerDatetimeOverride))
-    , SavedLocalHostNameOverride_(GetTlsRef(ErrorSanitizerLocalHostNameOverride))
+    : SavedEnabled_(ErrorSanitizerEnabled())
+    , SavedDatetimeOverride_(ErrorSanitizerDatetimeOverride())
+    , SavedLocalHostNameOverride_(ErrorSanitizerLocalHostNameOverride())
 {
-    ErrorSanitizerEnabled = true;
-    GetTlsRef(ErrorSanitizerDatetimeOverride) = datetimeOverride;
-    GetTlsRef(ErrorSanitizerLocalHostNameOverride) = std::move(localHostNameOverride);
+    ErrorSanitizerEnabled() = true;
+    ErrorSanitizerDatetimeOverride() = datetimeOverride;
+    ErrorSanitizerLocalHostNameOverride() = std::move(localHostNameOverride);
 }
 
 TErrorSanitizerGuard::~TErrorSanitizerGuard()
 {
-    YT_ASSERT(ErrorSanitizerEnabled);
+    YT_ASSERT(ErrorSanitizerEnabled());
 
-    ErrorSanitizerEnabled = SavedEnabled_;
-    GetTlsRef(ErrorSanitizerDatetimeOverride) = SavedDatetimeOverride_;
-    GetTlsRef(ErrorSanitizerLocalHostNameOverride) = std::move(SavedLocalHostNameOverride_);
+    ErrorSanitizerEnabled() = SavedEnabled_;
+    ErrorSanitizerDatetimeOverride() = SavedDatetimeOverride_;
+    ErrorSanitizerLocalHostNameOverride() = std::move(SavedLocalHostNameOverride_);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -215,6 +210,14 @@ public:
         return TraceId_ != NTracing::InvalidTraceId;
     }
 
+    void SetTracingAttributes(NTracing::TTracingAttributes tracingAttributes)
+    {
+        YT_VERIFY(!HasTracingAttributes());
+
+        TraceId_ = tracingAttributes.TraceId;
+        SpanId_ = tracingAttributes.SpanId;
+    }
+
     NTracing::TTraceId GetTraceId() const
     {
         return TraceId_;
@@ -301,9 +304,9 @@ private:
 
     void CaptureOriginAttributes()
     {
-        if (ErrorSanitizerEnabled) {
-            Datetime_ = GetTlsRef(ErrorSanitizerDatetimeOverride);
-            HostHolder_ = GetTlsRef(ErrorSanitizerLocalHostNameOverride);
+        if (ErrorSanitizerEnabled()) {
+            Datetime_ = ErrorSanitizerDatetimeOverride();
+            HostHolder_ = ErrorSanitizerLocalHostNameOverride();
             Host_ = HostHolder_.empty() ? TStringBuf() : TStringBuf(HostHolder_.Begin(), HostHolder_.End());
             return;
         }
@@ -631,6 +634,14 @@ bool TError::HasTracingAttributes() const
     return Impl_->HasTracingAttributes();
 }
 
+void TError::SetTracingAttributes(NTracing::TTracingAttributes tracingAttributes)
+{
+    if (!Impl_) {
+        return;
+    }
+    Impl_->SetTracingAttributes(tracingAttributes);
+}
+
 NTracing::TTraceId TError::GetTraceId() const
 {
     if (!Impl_) {
@@ -797,13 +808,6 @@ bool TError::IsOK() const
     return Impl_->IsOK();
 }
 
-void TError::ThrowOnError() const
-{
-    if (!IsOK()) {
-        THROW_ERROR *this;
-    }
-}
-
 TError TError::Wrap() const &
 {
     return *this;
@@ -954,25 +958,6 @@ std::optional<TError> TError::FindMatching(const THashSet<TErrorCode>& codes) co
     });
 }
 
-std::optional<TError> TError::FindMatching(std::function<bool(TErrorCode)> filter) const
-{
-    if (!Impl_) {
-        return {};
-    }
-
-    if (filter(GetCode())) {
-        return *this;
-    }
-
-    for (const auto& innerError : InnerErrors()) {
-        if (auto innerResult = innerError.FindMatching(filter)) {
-            return innerResult;
-        }
-    }
-
-    return {};
-}
-
 TError::TErrorOr(std::unique_ptr<TImpl> impl)
     : Impl_(std::move(impl))
 { }
@@ -1034,7 +1019,7 @@ void AppendError(TStringBuilderBase* builder, const TError& error, int indent)
                 (!error.GetThreadName().empty() ? error.GetThreadName() : ToString(error.GetTid())),
                 error.GetFid()),
             indent);
-    } else if (ErrorSanitizerEnabled && error.HasHost()) {
+    } else if (ErrorSanitizerEnabled() && error.HasHost()) {
         AppendAttribute(
             builder,
             "host",
@@ -1107,13 +1092,6 @@ void FormatValue(TStringBuilderBase* builder, const TError& error, TStringBuf /*
     AppendError(builder, error, 0);
 }
 
-TString ToString(const TError& error)
-{
-    TStringBuilder builder;
-    AppendError(&builder, error, 0);
-    return builder.Flush();
-}
-
 void ToProto(NYT::NProto::TError* protoError, const TError& error)
 {
     if (!error.Impl_) {
@@ -1151,7 +1129,7 @@ void ToProto(NYT::NProto::TError* protoError, const TError& error)
 
         static const TString FidKey("fid");
         addAttribute(FidKey, error.GetFid());
-    } else if (ErrorSanitizerEnabled && error.HasHost()) {
+    } else if (ErrorSanitizerEnabled() && error.HasHost()) {
         static const TString HostKey("host");
         addAttribute(HostKey, error.GetHost());
     }
@@ -1243,6 +1221,7 @@ void Serialize(
     const std::function<void(IYsonConsumer*)>* valueProducer,
     int depth)
 {
+    auto& errorSanitizerEnabled = ErrorSanitizerEnabled();
     BuildYsonFluently(consumer)
         .BeginMap()
             .Item("code").Value(error.GetCode())
@@ -1255,7 +1234,7 @@ void Serialize(
                         .Item("tid").Value(error.GetTid())
                         .Item("thread").Value(error.GetThreadName())
                         .Item("fid").Value(error.GetFid());
-                } else if (ErrorSanitizerEnabled && error.HasHost()) {
+                } else if (errorSanitizerEnabled && error.HasHost()) {
                     fluent
                         .Item("host").Value(error.GetHost());
                 }

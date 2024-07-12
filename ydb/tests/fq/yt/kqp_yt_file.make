@@ -16,13 +16,14 @@ ENDIF()
 
 DEPENDS(
     ydb/library/yql/tests/common/test_framework/udfs_deps
+    ydb/library/yql/udfs/test/test_import
     ydb/tests/tools/kqprun
 )
 
 DATA(
-    arcadia/ydb/library/yql/cfg/tests
     arcadia/ydb/library/yql/tests/sql
     arcadia/ydb/tests/fq/yt
+    arcadia/ydb/tests/fq/yt/cfg
 )
 
 PEERDIR(

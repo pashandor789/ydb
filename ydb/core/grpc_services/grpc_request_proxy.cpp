@@ -117,6 +117,11 @@ private:
             NYql::TIssues()});
     }
 
+    void Handle(TEvRequestAuthAndCheck::TPtr& ev, const TActorContext&) {
+        ev->Get()->FinishSpan();
+        ev->Get()->ReplyWithYdbStatus(Ydb::StatusIds::SUCCESS);
+    }
+
     // returns true and defer event if no updates for given database
     // otherwice returns false and leave event untouched
     template <typename TEvent>
@@ -186,8 +191,8 @@ private:
             if (maybeDatabaseName && !maybeDatabaseName.GetRef().empty()) {
                 databaseName = CanonizePath(maybeDatabaseName.GetRef());
             } else {
-                if (!AllowYdbRequestsWithoutDatabase && DynamicNode) {
-                    requestBaseCtx->ReplyUnauthenticated("Requests without specified database is not allowed");
+                if (!AllowYdbRequestsWithoutDatabase && DynamicNode && !std::is_same_v<TEvent, TEvRequestAuthAndCheck>) { // TEvRequestAuthAndCheck is allowed to be processed without database
+                    requestBaseCtx->ReplyUnauthenticated("Requests without specified database are not allowed");
                     requestBaseCtx->FinishSpan();
                     return;
                 } else {
@@ -590,6 +595,7 @@ void TGRpcRequestProxyImpl::StateFunc(TAutoPtr<IEventHandle>& ev) {
         HFunc(TEvCoordinationSessionRequest, PreHandle);
         HFunc(TEvNodeCheckRequest, PreHandle);
         HFunc(TEvProxyRuntimeEvent, PreHandle);
+        HFunc(TEvRequestAuthAndCheck, PreHandle);
 
         default:
             Y_ABORT("Unknown request: %u\n", ev->GetTypeRewrite());

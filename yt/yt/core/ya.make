@@ -9,6 +9,8 @@ IF (ARCH_X86_64)
     CFLAGS(-mpclmul)
 ENDIF()
 
+NO_LTO()
+
 SRCS(
     actions/cancelable_context.cpp
     actions/current_invoker.cpp
@@ -117,7 +119,6 @@ SRCS(
     misc/coro_pipe.cpp
     misc/crash_handler.cpp
     misc/digest.cpp
-    misc/dnf.cpp
     misc/error.cpp
     misc/error_code.cpp
     misc/ema_counter.cpp
@@ -138,6 +139,7 @@ SRCS(
     misc/phoenix.cpp
     misc/pool_allocator.cpp
     misc/proc.cpp
+    misc/process_exit_profiler.cpp
     misc/protobuf_helpers.cpp
     misc/public.cpp
     misc/random.cpp
@@ -170,6 +172,13 @@ SRCS(
     dns/dns_resolver.cpp
 
     profiling/timing.cpp
+
+    phoenix/context.cpp
+    phoenix/descriptors.cpp
+    phoenix/load.cpp
+    phoenix/schemas.cpp
+    phoenix/type_def.cpp
+    phoenix/type_registry.cpp
 
     rpc/authentication_identity.cpp
     rpc/authenticator.cpp
@@ -398,6 +407,7 @@ IF (NOT OS_WINDOWS)
         crypto/unittests
         json/unittests
         logging/unittests
+        phoenix/unittests
         profiling/unittests
         rpc/unittests
         ypath/unittests

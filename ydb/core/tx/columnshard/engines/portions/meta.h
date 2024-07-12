@@ -2,9 +2,9 @@
 #include <ydb/core/tx/columnshard/common/portion.h>
 #include <ydb/core/tx/columnshard/common/snapshot.h>
 #include <ydb/core/tx/columnshard/engines/scheme/statistics/abstract/portion_storage.h>
+#include <ydb/core/tx/columnshard/engines/protos/portion_info.pb.h>
 #include <ydb/core/formats/arrow/replace_key.h>
 #include <ydb/core/formats/arrow/special_keys.h>
-#include <ydb/core/protos/tx_columnshard.pb.h>
 #include <ydb/library/accessor/accessor.h>
 #include <util/stream/output.h>
 
@@ -17,6 +17,7 @@ private:
     NArrow::TFirstLastSpecialKeys ReplaceKeyEdges; // first and last PK rows
     YDB_READONLY_DEF(TString, TierName);
     YDB_READONLY_DEF(NStatistics::TPortionStorage, StatisticsStorage);
+    YDB_READONLY(ui32, DeletionsCount, 0);
     friend class TPortionMetaConstructor;
     TPortionMeta(NArrow::TFirstLastSpecialKeys& pk, const TSnapshot& min, const TSnapshot& max)
         : ReplaceKeyEdges(pk)

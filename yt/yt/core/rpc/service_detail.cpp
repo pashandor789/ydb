@@ -1389,13 +1389,13 @@ void TRequestQueue::ConfigureWeightThrottler(const TThroughputThrottlerConfigPtr
 
 bool TRequestQueue::IsQueueSizeLimitExceeded() const
 {
-    return QueueSize_.load(std::memory_order::relaxed) >=
+    return QueueSize_.load(std::memory_order::relaxed) >
         RuntimeInfo_->QueueSizeLimit.load(std::memory_order::relaxed);
 }
 
 bool TRequestQueue::IsQueueByteSizeLimitExceeded() const
 {
-    return QueueByteSize_.load(std::memory_order::relaxed) >=
+    return QueueByteSize_.load(std::memory_order::relaxed) >
         RuntimeInfo_->QueueByteSizeLimit.load(std::memory_order::relaxed);
 }
 
@@ -1453,17 +1453,17 @@ void TRequestQueue::OnRequestFinished(i64 requestTotalSize)
 // Prevents reentrant invocations.
 // One case is: RunRequest calling the handler synchronously, which replies the
 // context, which calls context->Finish, and we're back here again.
-YT_THREAD_LOCAL(bool) ScheduleRequestsLatch = false;
+YT_DEFINE_THREAD_LOCAL(bool, ScheduleRequestsLatch, false);
 
 void TRequestQueue::ScheduleRequestsFromQueue()
 {
-    if (ScheduleRequestsLatch) {
+    if (ScheduleRequestsLatch()) {
         return;
     }
 
-    ScheduleRequestsLatch = true;
+    ScheduleRequestsLatch() = true;
     auto latchGuard = Finally([&] {
-        ScheduleRequestsLatch = false;
+        ScheduleRequestsLatch() = false;
     });
 
 #ifndef NDEBUG
@@ -2597,7 +2597,16 @@ void TServiceBase::DoConfigure(
 
         // Validate configuration.
         for (const auto& [methodName, _] : config->Methods) {
-            GetMethodInfoOrThrow(methodName);
+            auto* method = FindMethodInfo(methodName);
+
+            if (!method) {
+                // TODO(don-dron): Split service configs by realmid.
+                YT_LOG_WARNING(
+                    "Method is not registered (Service: %v, RealmId: %v, Method: %v)",
+                    ServiceId_.ServiceName,
+                    ServiceId_.RealmId,
+                    methodName);
+            }
         }
 
         EnablePerUserProfiling_.store(config->EnablePerUserProfiling.value_or(configDefaults->EnablePerUserProfiling));

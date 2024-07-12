@@ -135,7 +135,7 @@
  *		- Protects both PredXact and SerializableXidHash.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -494,7 +494,7 @@ static void ReleasePredicateLocksLocal(void);
 static inline bool
 PredicateLockingNeededForRelation(Relation relation)
 {
-	return !(relation->rd_id < FirstBootstrapObjectId ||
+	return !(relation->rd_id < FirstUnpinnedObjectId ||
 			 RelationUsesLocalBuffers(relation) ||
 			 relation->rd_rel->relkind == RELKIND_MATVIEW);
 }
@@ -1277,6 +1277,7 @@ InitPredicateLocks(void)
 		PredXact->OldCommittedSxact->xmin = InvalidTransactionId;
 		PredXact->OldCommittedSxact->flags = SXACT_FLAG_COMMITTED;
 		PredXact->OldCommittedSxact->pid = 0;
+		PredXact->OldCommittedSxact->pgprocno = INVALID_PGPROCNO;
 	}
 	/* This never changes, so let's keep a local copy. */
 	OldCommittedSxact = PredXact->OldCommittedSxact;
@@ -1846,24 +1847,6 @@ GetSerializableTransactionSnapshotInt(Snapshot snapshot,
 		return snapshot;
 	}
 
-	/* Maintain serializable global xmin info. */
-	if (!TransactionIdIsValid(PredXact->SxactGlobalXmin))
-	{
-		Assert(PredXact->SxactGlobalXminCount == 0);
-		PredXact->SxactGlobalXmin = snapshot->xmin;
-		PredXact->SxactGlobalXminCount = 1;
-		SerialSetActiveSerXmin(snapshot->xmin);
-	}
-	else if (TransactionIdEquals(snapshot->xmin, PredXact->SxactGlobalXmin))
-	{
-		Assert(PredXact->SxactGlobalXminCount > 0);
-		PredXact->SxactGlobalXminCount++;
-	}
-	else
-	{
-		Assert(TransactionIdFollows(snapshot->xmin, PredXact->SxactGlobalXmin));
-	}
-
 	/* Initialize the structure. */
 	sxact->vxid = vxid;
 	sxact->SeqNo.lastCommitBeforeSnapshot = PredXact->LastSxactCommitSeqNo;
@@ -1876,6 +1859,7 @@ GetSerializableTransactionSnapshotInt(Snapshot snapshot,
 	sxact->finishedBefore = InvalidTransactionId;
 	sxact->xmin = snapshot->xmin;
 	sxact->pid = MyProcPid;
+	sxact->pgprocno = MyProc->pgprocno;
 	SHMQueueInit(&(sxact->predicateLocks));
 	SHMQueueElemInit(&(sxact->finishedLink));
 	sxact->flags = 0;
@@ -1900,12 +1884,43 @@ GetSerializableTransactionSnapshotInt(Snapshot snapshot,
 				SetPossibleUnsafeConflict(sxact, othersxact);
 			}
 		}
+
+		/*
+		 * If we didn't find any possibly unsafe conflicts because every
+		 * uncommitted writable transaction turned out to be doomed, then we
+		 * can "opt out" immediately.  See comments above the earlier check for
+		 * PredXact->WritableSxactCount == 0.
+		 */
+		if (SHMQueueEmpty(&sxact->possibleUnsafeConflicts))
+		{
+			ReleasePredXact(sxact);
+			LWLockRelease(SerializableXactHashLock);
+			return snapshot;
+		}
 	}
 	else
 	{
 		++(PredXact->WritableSxactCount);
 		Assert(PredXact->WritableSxactCount <=
 			   (MaxBackends + max_prepared_xacts));
+	}
+
+	/* Maintain serializable global xmin info. */
+	if (!TransactionIdIsValid(PredXact->SxactGlobalXmin))
+	{
+		Assert(PredXact->SxactGlobalXminCount == 0);
+		PredXact->SxactGlobalXmin = snapshot->xmin;
+		PredXact->SxactGlobalXminCount = 1;
+		SerialSetActiveSerXmin(snapshot->xmin);
+	}
+	else if (TransactionIdEquals(snapshot->xmin, PredXact->SxactGlobalXmin))
+	{
+		Assert(PredXact->SxactGlobalXminCount > 0);
+		PredXact->SxactGlobalXminCount++;
+	}
+	else
+	{
+		Assert(TransactionIdFollows(snapshot->xmin, PredXact->SxactGlobalXmin));
 	}
 
 	MySerializableXact = sxact;
@@ -3331,6 +3346,7 @@ SetNewSxactGlobalXmin(void)
 void
 ReleasePredicateLocks(bool isCommit, bool isReadOnlySafe)
 {
+	bool		partiallyReleasing = false;
 	bool		needToClear;
 	RWConflict	conflict,
 				nextConflict,
@@ -3431,6 +3447,7 @@ ReleasePredicateLocks(bool isCommit, bool isReadOnlySafe)
 		else
 		{
 			MySerializableXact->flags |= SXACT_FLAG_PARTIALLY_RELEASED;
+			partiallyReleasing = true;
 			/* ... and proceed to perform the partial release below. */
 		}
 	}
@@ -3669,7 +3686,7 @@ ReleasePredicateLocks(bool isCommit, bool isReadOnlySafe)
 			 */
 			if (SxactIsDeferrableWaiting(roXact) &&
 				(SxactIsROUnsafe(roXact) || SxactIsROSafe(roXact)))
-				ProcSendSignal(roXact->pid);
+				ProcSendSignal(roXact->pgprocno);
 
 			possibleUnsafeConflict = nextConflict;
 		}
@@ -3681,9 +3698,15 @@ ReleasePredicateLocks(bool isCommit, bool isReadOnlySafe)
 	 * serializable transactions completes.  We then find the "new oldest"
 	 * xmin and purge any transactions which finished before this transaction
 	 * was launched.
+	 *
+	 * For parallel queries in read-only transactions, it might run twice.
+	 * We only release the reference on the first call.
 	 */
 	needToClear = false;
-	if (TransactionIdEquals(MySerializableXact->xmin, PredXact->SxactGlobalXmin))
+	if ((partiallyReleasing ||
+		 !SxactIsPartiallyReleased(MySerializableXact)) &&
+		TransactionIdEquals(MySerializableXact->xmin,
+							PredXact->SxactGlobalXmin))
 	{
 		Assert(PredXact->SxactGlobalXminCount > 0);
 		if (--(PredXact->SxactGlobalXminCount) == 0)
@@ -4839,10 +4862,14 @@ PreCommit_CheckForSerializationFailure(void)
 
 	LWLockAcquire(SerializableXactHashLock, LW_EXCLUSIVE);
 
-	/* Check if someone else has already decided that we need to die */
-	if (SxactIsDoomed(MySerializableXact))
+	/*
+	 * Check if someone else has already decided that we need to die.  Since
+	 * we set our own DOOMED flag when partially releasing, ignore in that
+	 * case.
+	 */
+	if (SxactIsDoomed(MySerializableXact) &&
+		!SxactIsPartiallyReleased(MySerializableXact))
 	{
-		Assert(!SxactIsPartiallyReleased(MySerializableXact));
 		LWLockRelease(SerializableXactHashLock);
 		ereport(ERROR,
 				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
@@ -5006,6 +5033,7 @@ PostPrepare_PredicateLocks(TransactionId xid)
 	Assert(SxactIsPrepared(MySerializableXact));
 
 	MySerializableXact->pid = 0;
+	MySerializableXact->pgprocno = INVALID_PGPROCNO;
 
 	hash_destroy(LocalPredicateLockHash);
 	LocalPredicateLockHash = NULL;
@@ -5081,6 +5109,7 @@ predicatelock_twophase_recover(TransactionId xid, uint16 info,
 		sxact->vxid.backendId = InvalidBackendId;
 		sxact->vxid.localTransactionId = (LocalTransactionId) xid;
 		sxact->pid = 0;
+		sxact->pgprocno = INVALID_PGPROCNO;
 
 		/* a prepared xact hasn't committed yet */
 		sxact->prepareSeqNo = RecoverySerCommitSeqNo;

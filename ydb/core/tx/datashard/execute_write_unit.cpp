@@ -147,7 +147,7 @@ public:
             switch (operationType) {
                 case NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPSERT: {
                     fillOps(rowIdx);
-                    userDb.UpdateRow(fullTableId, key, ops);
+                    userDb.UpsertRow(fullTableId, key, ops);
                     break;
                 }
                 case NKikimrDataEvents::TEvWrite::TOperation::OPERATION_REPLACE: {
@@ -164,6 +164,11 @@ public:
                     userDb.InsertRow(fullTableId, key, ops);
                     break;
                 }
+                case NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPDATE: {
+                    fillOps(rowIdx);
+                    userDb.UpdateRow(fullTableId, key, ops);
+                    break;
+                }
                 default:
                     // Checked before in TWriteOperation
                     Y_FAIL_S(operationType << " operation is not supported now");
@@ -173,7 +178,8 @@ public:
         switch (operationType) {
             case NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPSERT:
             case NKikimrDataEvents::TEvWrite::TOperation::OPERATION_REPLACE:
-            case NKikimrDataEvents::TEvWrite::TOperation::OPERATION_INSERT: {
+            case NKikimrDataEvents::TEvWrite::TOperation::OPERATION_INSERT:
+            case NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPDATE: {
                 DataShard.IncCounter(COUNTER_WRITE_ROWS, matrix.GetRowCount());
                 DataShard.IncCounter(COUNTER_WRITE_BYTES, matrix.GetBuffer().size());
                 break;
@@ -341,6 +347,8 @@ public:
                 return EExecutionStatus::Executed;
             }
 
+            const bool isArbiter = op->HasVolatilePrepareFlag() && KqpLocksIsArbiter(tabletId, kqpLocks);
+
             KqpCommitLocks(tabletId, kqpLocks, sysLocks, writeVersion, userDb);
 
             TValidatedWriteTx::TPtr& writeTx = writeOp->GetWriteTx();
@@ -385,8 +393,13 @@ public:
                     participants,
                     userDb.GetChangeGroup(),
                     userDb.GetVolatileCommitOrdered(),
+                    isArbiter,
                     txc
                 );
+            }
+
+            if (userDb.GetPerformedUserReads()) {
+                op->SetPerformedUserReads(true);
             }
 
             if (op->HasVolatilePrepareFlag()) {

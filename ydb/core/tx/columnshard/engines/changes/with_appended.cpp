@@ -1,4 +1,5 @@
 #include "with_appended.h"
+
 #include <ydb/core/tx/columnshard/blob_cache.h>
 #include <ydb/core/tx/columnshard/columnshard_impl.h>
 #include <ydb/core/tx/columnshard/engines/column_engine_logs.h>
@@ -14,9 +15,9 @@ void TChangesWithAppend::DoWriteIndexOnExecute(NColumnShard::TColumnShard* self,
         Y_ABORT_UNLESS(!portionInfo.Empty());
         Y_ABORT_UNLESS(portionInfo.HasRemoveSnapshot());
         AFL_VERIFY(usedPortionIds.emplace(portionInfo.GetPortionId()).second)("portion_info", portionInfo.DebugString(true));
-        portionInfo.SaveToDatabase(context.DBWrapper, schemaPtr->GetIndexInfo().GetPKFirstColumnId(), true);
+        portionInfo.SaveToDatabase(context.DBWrapper, schemaPtr->GetIndexInfo().GetPKFirstColumnId(), false);
     }
-    const auto predRemoveDroppedTable = [self](const TWritePortionInfoWithBlobs& item) {
+    const auto predRemoveDroppedTable = [self](const TWritePortionInfoWithBlobsResult& item) {
         auto& portionInfo = item.GetPortionResult();
         if (!!self && (!self->TablesManager.HasTable(portionInfo.GetPathId()) || self->TablesManager.GetTable(portionInfo.GetPathId()).IsDropped())) {
             AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "skip_inserted_data")("reason", "table_removed")("path_id", portionInfo.GetPathId());
@@ -39,7 +40,7 @@ void TChangesWithAppend::DoWriteIndexOnComplete(NColumnShard::TColumnShard* self
             auto& portionInfo = portionBuilder.GetPortionResult();
             switch (portionInfo.GetMeta().Produced) {
                 case NOlap::TPortionMeta::EProduced::UNSPECIFIED:
-                    Y_ABORT_UNLESS(false); // unexpected
+                    Y_ABORT_UNLESS(false);   // unexpected
                 case NOlap::TPortionMeta::EProduced::INSERTED:
                     self->IncCounter(NColumnShard::COUNTER_INDEXING_PORTIONS_WRITTEN);
                     break;
@@ -101,7 +102,7 @@ void TChangesWithAppend::DoOnAfterCompile() {
     }
 }
 
-std::vector<TWritePortionInfoWithBlobs> TChangesWithAppend::MakeAppendedPortions(const std::shared_ptr<arrow::RecordBatch> batch,
+std::vector<TWritePortionInfoWithBlobsConstructor> TChangesWithAppend::MakeAppendedPortions(const std::shared_ptr<arrow::RecordBatch> batch,
     const ui64 pathId, const TSnapshot& snapshot, const TGranuleMeta* granuleMeta, TConstructionContext& context, const std::optional<NArrow::NSerialization::TSerializerContainer>& overrideSaver) const {
     Y_ABORT_UNLESS(batch->num_rows());
 
@@ -115,7 +116,7 @@ std::vector<TWritePortionInfoWithBlobs> TChangesWithAppend::MakeAppendedPortions
     if (overrideSaver) {
         schema->SetOverrideSerializer(*overrideSaver);
     }
-    std::vector<TWritePortionInfoWithBlobs> out;
+    std::vector<TWritePortionInfoWithBlobsConstructor> out;
     {
         std::vector<TBatchSerializedSlice> pages = TBatchSerializedSlice::BuildSimpleSlices(batch, NSplitter::TSplitSettings(), context.Counters.SplitterCounters, schema);
         std::vector<TGeneralSerializedSlice> generalPages;
@@ -133,12 +134,11 @@ std::vector<TWritePortionInfoWithBlobs> TChangesWithAppend::MakeAppendedPortions
         for (auto&& i : packs) {
             TGeneralSerializedSlice slice(std::move(i));
             auto b = batch->Slice(recordIdx, slice.GetRecordsCount());
-            out.emplace_back(TWritePortionInfoWithBlobs::BuildByBlobs(slice.GroupChunksByBlobs(groups), pathId, resultSchema->GetVersion(), snapshot, SaverContext.GetStoragesManager()));
-            out.back().FillStatistics(resultSchema->GetIndexInfo());
-            NArrow::TFirstLastSpecialKeys primaryKeys(slice.GetFirstLastPKBatch(resultSchema->GetIndexInfo().GetReplaceKey()));
-            NArrow::TMinMaxSpecialKeys snapshotKeys(b, TIndexInfo::ArrowSchemaSnapshot());
-            out.back().GetPortionConstructor().AddMetadata(*resultSchema, b);
-            out.back().GetPortionConstructor().MutableMeta().SetTierName(IStoragesManager::DefaultStorageId);
+            auto constructor = TWritePortionInfoWithBlobsConstructor::BuildByBlobs(slice.GroupChunksByBlobs(groups), pathId, resultSchema->GetVersion(), snapshot, SaverContext.GetStoragesManager());
+            constructor.FillStatistics(resultSchema->GetIndexInfo());
+            constructor.GetPortionConstructor().AddMetadata(*resultSchema, b);
+            constructor.GetPortionConstructor().MutableMeta().SetTierName(IStoragesManager::DefaultStorageId);
+            out.emplace_back(std::move(constructor));
             recordIdx += slice.GetRecordsCount();
         }
     }
@@ -149,4 +149,4 @@ std::vector<TWritePortionInfoWithBlobs> TChangesWithAppend::MakeAppendedPortions
 void TChangesWithAppend::DoStart(NColumnShard::TColumnShard& /*self*/) {
 }
 
-}
+}   // namespace NKikimr::NOlap

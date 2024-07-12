@@ -1,3 +1,11 @@
 items:
-- name: Metrics reference
-  href: metrics/index.md
+- name: Overview
+  href: index.md
+- name: Metrics
+  include:
+    mode: link
+    path: metrics/toc_p.yaml
+- name: Tracing
+  include:
+    mode: link
+    path: tracing/toc_p.yaml

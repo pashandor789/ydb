@@ -5,6 +5,7 @@
 namespace NKikimr::NStat {
 
 struct TStatisticsAggregator::TTxSaveQueryResponse : public TTxBase {
+    std::unordered_set<TActorId> ReplyToActorIds;
 
     TTxSaveQueryResponse(TSelf* self)
         : TTxBase(self)
@@ -15,32 +16,10 @@ struct TStatisticsAggregator::TTxSaveQueryResponse : public TTxBase {
     bool Execute(TTransactionContext& txc, const TActorContext&) override {
         SA_LOG_D("[" << Self->TabletID() << "] TTxSaveQueryResponse::Execute");
 
+        ReplyToActorIds.swap(Self->ReplyToActorIds);
+
         NIceDb::TNiceDb db(txc.DB);
-
-        if (!Self->ScanTablesByTime.empty()) {
-            auto& topTable = Self->ScanTablesByTime.top();
-            auto pathId = topTable.PathId;
-            if (pathId == Self->ScanTableId.PathId) {
-                TScanTable scanTable;
-                scanTable.PathId = pathId;
-                scanTable.SchemeShardId = topTable.SchemeShardId;
-                scanTable.LastUpdateTime = Self->ScanStartTime;
-
-                Self->ScanTablesByTime.pop();
-                Self->ScanTablesByTime.push(scanTable);
-
-                db.Table<Schema::ScanTables>().Key(pathId.OwnerId, pathId.LocalPathId).Update(
-                    NIceDb::TUpdate<Schema::ScanTables::LastUpdateTime>(Self->ScanStartTime.MicroSeconds()));
-            }
-        }
-
-        Self->ScanTableId.PathId = TPathId();
-        Self->PersistScanTableId(db);
-
-        for (auto& [tag, _] : Self->CountMinSketches) {
-            db.Table<Schema::Statistics>().Key(tag).Delete();
-        }
-        Self->CountMinSketches.clear();
+        Self->FinishScan(db);
 
         return true;
     }
@@ -48,11 +27,9 @@ struct TStatisticsAggregator::TTxSaveQueryResponse : public TTxBase {
     void Complete(const TActorContext& ctx) override {
         SA_LOG_D("[" << Self->TabletID() << "] TTxSaveQueryResponse::Complete");
 
-        if (Self->ReplyToActorId) {
-            ctx.Send(Self->ReplyToActorId, new TEvStatistics::TEvScanTableResponse);
+        for (auto& id : ReplyToActorIds) {
+            ctx.Send(id, new TEvStatistics::TEvScanTableResponse);
         }
-
-        Self->ScheduleNextScan();
     }
 };
 void TStatisticsAggregator::Handle(TEvStatistics::TEvSaveStatisticsQueryResponse::TPtr&) {

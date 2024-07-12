@@ -69,47 +69,61 @@ int NodeTag(const Node* node) {
     return nodeTag(node);
 }
 
-int NodeTag(const Value& node) {
-    return node.type;
+int NodeTag(const A_Const::ValUnion& val) {
+    return NodeTag(&val.node);
 }
 
-int IntVal(const Value& node) {
-    Y_ENSURE(node.type == T_Integer);
-    return intVal(&node);
+int IntVal(const A_Const::ValUnion& val) {
+    Y_ENSURE(val.node.type == T_Integer);
+    return intVal(&val.node);
 }
 
-const char* StrFloatVal(const Value& node) {
-    Y_ENSURE(node.type == T_Float);
-    return strVal(&node);
+bool BoolVal(const A_Const::ValUnion& val) {
+    Y_ENSURE(val.node.type == T_Boolean);
+    return boolVal(&val.node);
 }
 
-const char* StrVal(const Value& node) {
-    Y_ENSURE(node.type == T_String || node.type == T_BitString);
-    return strVal(&node);
+const char* StrFloatVal(const A_Const::ValUnion& val) {
+    Y_ENSURE(val.node.type == T_Float);
+    return strVal(&val.node);
+}
+
+const char* StrVal(const A_Const::ValUnion& val) {
+    Y_ENSURE(val.node.type == T_String || val.node.type == T_BitString);
+    return strVal(&val.node);
 }
 
 int IntVal(const Node* node) {
     Y_ENSURE(node->type == T_Integer);
-    return intVal((const Value*)node);
+    return intVal(node);
 }
 
 double FloatVal(const Node* node) {
     Y_ENSURE(node->type == T_Float);
-    return floatVal((const Value*)node);
+    return floatVal(node);
 }
 
 const char* StrFloatVal(const Node* node) {
     Y_ENSURE(node->type == T_Float);
-    return strVal((const Value*)node);
+    return strVal(node);
 }
 
 const char* StrVal(const Node* node) {
     Y_ENSURE(node->type == T_String || node->type == T_BitString);
-    return strVal((const Value*)node);
+    return strVal(node);
 }
 
-bool ValueAsString(const Value& val, TString& ret) {
+bool ValueAsString(const A_Const::ValUnion& val, bool isNull, TString& ret) {
+    if (isNull) {
+        ret = "NULL";
+        return true;
+    }
+
     switch (NodeTag(val)) {
+    case T_Boolean: {
+        ret = BoolVal(val) ? "t" : "f";
+        return true;
+    }
     case T_Integer: {
         ret = ToString(IntVal(val));
         return true;
@@ -121,10 +135,6 @@ bool ValueAsString(const Value& val, TString& ret) {
     case T_String:
     case T_BitString: {
         ret = StrVal(val);
-        return true;
-    }
-    case T_Null: {
-        ret = "NULL";
         return true;
     }
     default:
@@ -242,6 +252,7 @@ public:
     struct TPgConst {
         TMaybe<TString> value;
         enum class Type {
+            boolean,
             int4,
             int8,
             numeric,
@@ -253,6 +264,8 @@ public:
 
         static TString ToString(const TPgConst::Type& type) {
             switch (type) {
+                case TPgConst::Type::boolean:
+                    return "bool";
                 case TPgConst::Type::int4:
                     return "int4";
                 case TPgConst::Type::int8:
@@ -282,6 +295,7 @@ public:
         ui32 ReadIndex = 0;
         TViews Views;
         TVector<TViews> CTE;
+        const TView* CurrentRecursiveView = nullptr;
         TVector<NYql::TPosition> Positions = {NYql::TPosition()};
         THashMap<TString, TString> ParamNameToPgTypeName;
         THashMap<TString, Ydb::TypedValue> AutoParamValues;
@@ -450,7 +464,7 @@ public:
         }
         switch (NodeTag(node)) {
         case T_SelectStmt:
-            return ParseSelectStmt(CAST_NODE(SelectStmt, node), false) != nullptr;
+            return ParseSelectStmt(CAST_NODE(SelectStmt, node), {.Inner = false}) != nullptr;
         case T_InsertStmt:
             return ParseInsertStmt(CAST_NODE(InsertStmt, node)) != nullptr;
         case T_UpdateStmt:
@@ -503,6 +517,10 @@ public:
             return ParseIndexStmt(CAST_NODE(IndexStmt, node)) != nullptr;
         case T_CreateSeqStmt:
             return ParseCreateSeqStmt(CAST_NODE(CreateSeqStmt, node)) != nullptr;
+        case T_AlterSeqStmt:
+            return ParseAlterSeqStmt(CAST_NODE(AlterSeqStmt, node)) != nullptr;
+        case T_AlterTableStmt:
+            return ParseAlterTableStmt(CAST_NODE(AlterTableStmt, node)) != nullptr;
         default:
             NodeNotImplemented(value, node);
             return false;
@@ -717,29 +735,28 @@ public:
         auto arg0 = ListNodeNth(value->args, 0);
         auto arg1 = ListNodeNth(value->args, 1);
         auto arg2 = ListNodeNth(value->args, 2);
-        if (NodeTag(arg2) != T_TypeCast) {
-            AddError(TStringBuilder() << "Expected type cast node as is_local arg, but got node with tag");
+        if (NodeTag(arg2) != T_A_Const) {
+            AddError(TStringBuilder() << "Expected AConst node as is_local arg, but got node with tag: " << NodeTag(arg2));
             return nullptr;
         }
-        auto isLocalCast = CAST_NODE(TypeCast, arg2)->arg;
-        if (NodeTag(isLocalCast) != T_A_Const) {
-            AddError(TStringBuilder() << "Expected a_const in cast, but got something wrong: " << NodeTag(isLocalCast));
+        auto isLocalConst = CAST_NODE(A_Const, arg2);
+        if (isLocalConst->isnull) {
+            AddError(TStringBuilder() << "Expected t/f, but got null");
             return nullptr;
         }
-        auto isLocalConst = CAST_NODE(A_Const, isLocalCast);
-        if (NodeTag(isLocalConst->val) != T_String) {
-            AddError(TStringBuilder() << "Expected string in const, but got something wrong: " << NodeTag(isLocalCast));
+        if (NodeTag(isLocalConst->val) != T_Boolean) {
+            AddError(TStringBuilder() << "Expected bool in const, but got something wrong: " << NodeTag(isLocalConst->val));
             return nullptr;
         }
-        auto rawVal = TString(StrVal(isLocalConst->val));
-        if (rawVal != "t" && rawVal != "f") {
-            AddError(TStringBuilder() << "Expected t/f, but got " << rawVal);
-            return nullptr;
-        }
-        config.is_local = rawVal == "t";
+        config.is_local = BoolVal(isLocalConst->val);
 
         if (NodeTag(arg0) != T_A_Const || NodeTag(arg1) != T_A_Const) {
             AddError(TStringBuilder() << "Expected const with string, but got something else: " << NodeTag(arg0));
+            return nullptr;
+        }
+
+        if (CAST_NODE(A_Const, arg0)->isnull || CAST_NODE(A_Const, arg1)->isnull) {
+            AddError(TStringBuilder() << "Expected string const as name arg, but got null");
             return nullptr;
         }
 
@@ -750,22 +767,27 @@ public:
             return nullptr;
         }
         config.name = (char*)StrVal(name);
-        config.args = list_make1((void*)(&val));
+        config.args = list_make1((void*)arg1);
         return ParseVariableSetStmt(&config, true);
     }
 
     using TTraverseSelectStack = TStack<std::pair<const SelectStmt*, bool>>;
     using TTraverseNodeStack = TStack<std::pair<const Node*, bool>>;
 
+    struct TSelectStmtSettings {
+        bool Inner = true;
+        mutable TVector<TAstNode*> TargetColumns;
+        bool AllowEmptyResSet = false;
+        bool EmitPgStar = false;
+        bool FillTargetColumns = false;
+        bool UnknownsAllowed = false;
+        const TView* Recursive = nullptr;
+    };
+
     [[nodiscard]]
     TAstNode* ParseSelectStmt(
         const SelectStmt* value,
-        bool inner,
-        TVector <TAstNode*> targetColumns = {},
-        bool allowEmptyResSet = false,
-        bool emitPgStar = false,
-        bool fillTargetColumns = false,
-        bool unknownsAllowed = false
+        const TSelectStmtSettings& selectSettings
     ) {
         if (Settings.Mode == NSQLTranslation::ESqlMode::LIMITED_VIEW) {
             if (HasSelectInLimitedView) {
@@ -776,11 +798,14 @@ public:
             HasSelectInLimitedView = true;
         }
 
-        bool isValuesClauseOfInsertStmt = fillTargetColumns;
+        bool isValuesClauseOfInsertStmt = selectSettings.FillTargetColumns;
 
         State.CTE.emplace_back();
+        auto prevRecursiveView = State.CurrentRecursiveView;
+        State.CurrentRecursiveView = selectSettings.Recursive;
         Y_DEFER {
             State.CTE.pop_back();
+            State.CurrentRecursiveView = prevRecursiveView;
         };
 
         if (value->withClause) {
@@ -902,12 +927,12 @@ public:
                 auto node = ListNodeNth(x->fromClause, i);
                 if (NodeTag(node) != T_JoinExpr) {
                     auto p = ParseFromClause(node);
-                    if (!p.Source) {
+                    if (!p) {
                         return nullptr;
                     }
 
-                    AddFrom(p, fromList);
-                    joinOps.push_back(QL());
+                    AddFrom(*p, fromList);
+                    joinOps.push_back(QL(QL(QA("push"))));
                 } else {
                     TTraverseNodeStack traverseNodeStack;
                     traverseNodeStack.push({ node, false });
@@ -918,11 +943,12 @@ public:
                         if (NodeTag(top.first) != T_JoinExpr) {
                             // leaf
                             auto p = ParseFromClause(top.first);
-                            if (!p.Source) {
+                            if (!p) {
                                 return nullptr;
                             }
-                            AddFrom(p, fromList);
+                            AddFrom(*p, fromList);
                             traverseNodeStack.pop();
+                            oneJoinGroup.push_back(QL(QA("push")));
                         } else {
                             auto join = CAST_NODE(JoinExpr, top.first);
                             if (!join->larg || !join->rarg) {
@@ -941,18 +967,8 @@ public:
                             }
 
                             if (!top.second) {
-                                if (NodeTag(join->rarg) != T_JoinExpr) {
-                                    traverseNodeStack.push({ join->rarg, false });
-                                }
-                                if (NodeTag(join->larg) != T_JoinExpr) {
-                                    traverseNodeStack.push({ join->larg, false });
-                                }
-                                if (NodeTag(join->rarg) == T_JoinExpr) {
-                                    traverseNodeStack.push({ join->rarg, false });
-                                }
-                                if (NodeTag(join->larg) == T_JoinExpr) {
-                                    traverseNodeStack.push({ join->larg, false });
-                                }
+                                traverseNodeStack.push({ join->rarg, false });
+                                traverseNodeStack.push({ join->larg, false });
                                 top.second = true;
                             } else {
                                 TString op;
@@ -1103,7 +1119,7 @@ public:
                 return nullptr;
             }
 
-            if (!allowEmptyResSet && (ListLength(x->valuesLists) == 0) && (ListLength(x->targetList) == 0)) {
+            if (!selectSettings.AllowEmptyResSet && (ListLength(x->valuesLists) == 0) && (ListLength(x->targetList) == 0)) {
                 AddError("SelectStmt: both values_list and target_list are not allowed to be empty");
                 return nullptr;
             }
@@ -1131,11 +1147,11 @@ public:
 
             TVector<TAstNode*> res;
             ui32 i = 0;
-            if (emitPgStar && id + 1 == setItems.size()) {
+            if (selectSettings.EmitPgStar && id + 1 == setItems.size()) {
                 res.emplace_back(CreatePgStarResultItem());
                 i++;
             }
-            bool maybeSelectWithJustSetConfig = !inner && !sort && windowItems.empty() && !having && !groupBy && !whereFilter && !x->distinctClause  && ListLength(x->targetList) == 1;
+            bool maybeSelectWithJustSetConfig = !selectSettings.Inner && !sort && windowItems.empty() && !having && !groupBy && !whereFilter && !x->distinctClause  && ListLength(x->targetList) == 1;
             if (maybeSelectWithJustSetConfig) {
                 auto node = ListNodeNth(x->targetList, 0);
                 if (NodeTag(node) != T_ResTarget) {
@@ -1191,13 +1207,13 @@ public:
             }
 
             TVector<TAstNode*> setItemOptions;
-            if (emitPgStar) {
+            if (selectSettings.EmitPgStar) {
                 setItemOptions.push_back(QL(QA("emit_pg_star")));
             }
-            if (!targetColumns.empty()) {
-                setItemOptions.push_back(QL(QA("target_columns"), QVL(targetColumns.data(), targetColumns.size())));
+            if (!selectSettings.TargetColumns.empty()) {
+                setItemOptions.push_back(QL(QA("target_columns"), QVL(selectSettings.TargetColumns.data(), selectSettings.TargetColumns.size())));
             }
-            if (fillTargetColumns) {
+            if (selectSettings.FillTargetColumns) {
                 setItemOptions.push_back(QL(QA("fill_target_columns")));
             }
             if (ListLength(x->targetList) > 0) {
@@ -1245,7 +1261,7 @@ public:
                 setItemOptions.push_back(QL(QA("sort"), sort));
             }
 
-            if (unknownsAllowed || hasCombiningQueries) {
+            if (selectSettings.UnknownsAllowed || hasCombiningQueries) {
                 setItemOptions.push_back(QL(QA("unknowns_allowed")));
             }
 
@@ -1310,7 +1326,7 @@ public:
 
         auto output = L(A("PgSelect"), QVL(selectOptions.data(), selectOptions.size()));
 
-        if (inner) {
+        if (selectSettings.Inner) {
             return output;
         }
 
@@ -1343,11 +1359,6 @@ public:
     [[nodiscard]]
     bool ParseWithClause(const WithClause* value) {
         AT_LOCATION(value);
-        if (value->recursive) {
-            AddError("WithClause: recursion is not supported");
-            return false;
-        }
-
         for (int i = 0; i < ListLength(value->ctes); ++i) {
             auto object = ListNodeNth(value->ctes, i);
             if (NodeTag(object) != T_CommonTableExpr) {
@@ -1355,7 +1366,7 @@ public:
                 return false;
             }
 
-            if (!ParseCTE(CAST_NODE(CommonTableExpr, object))) {
+            if (!ParseCTE(CAST_NODE(CommonTableExpr, object), value->recursive)) {
                 return false;
             }
         }
@@ -1364,7 +1375,7 @@ public:
     }
 
     [[nodiscard]]
-    bool ParseCTE(const CommonTableExpr* value) {
+    bool ParseCTE(const CommonTableExpr* value, bool recursive) {
         AT_LOCATION(value);
         TView view;
         view.Name = value->ctename;
@@ -1384,7 +1395,11 @@ public:
             return false;
         }
 
-        view.Source = ParseSelectStmt(CAST_NODE(SelectStmt, value->ctequery), true);
+        view.Source = ParseSelectStmt(CAST_NODE(SelectStmt, value->ctequery), {
+            .Inner = true,
+            .Recursive = recursive ? &view : nullptr
+        });
+
         if (!view.Source) {
             return false;
         }
@@ -1529,12 +1544,14 @@ public:
         const auto select = (value->selectStmt)
             ? ParseSelectStmt(
                 CAST_NODE(SelectStmt, value->selectStmt),
-                true,
-                targetColumns,
-                /*allowEmptyResSet=*/false,
-                /*emitPgStar=*/false,
-                /*fillTargetColumns=*/true,
-                /*unknownsAllowed=*/true)
+                {
+                    .Inner = true,
+                    .TargetColumns = targetColumns,
+                    .AllowEmptyResSet = false,
+                    .EmitPgStar = false,
+                    .FillTargetColumns = true,
+                    .UnknownsAllowed = true
+                })
             : L(A("Void"));
         if (!select) {
             return nullptr;
@@ -1570,12 +1587,13 @@ public:
         };
         const auto select = ParseSelectStmt(
             &selectStmt,
-            /* inner */ true,
-            /* targetColumns */{},
-            /* allowEmptyResSet */ true,
-            /*emitPgStar=*/true,
-            /*fillTargetColumns=*/false,
-            /*unknownsAllowed=*/true
+            {
+                .Inner = true, 
+                .AllowEmptyResSet = true,
+                .EmitPgStar = true,
+                .FillTargetColumns = false,
+                .UnknownsAllowed = true
+            }
         );
         if (!select) {
             return nullptr;
@@ -1673,7 +1691,7 @@ public:
         }
 
 
-        view.Source = ParseSelectStmt(CAST_NODE(SelectStmt, value->query), true);
+        view.Source = ParseSelectStmt(CAST_NODE(SelectStmt, value->query), { .Inner = true });
         if (!view.Source) {
             return nullptr;
         }
@@ -2266,20 +2284,11 @@ public:
             TVector<TString> values;
             for (int i = 0; i < ListLength(value->args); ++i) {
                 auto val = ListNodeNth(value->args, i);
-                if (!isSetConfig) {
-                    if (NodeTag(val) == T_A_Const) {
-                        val = (const Node*)&CAST_NODE(A_Const, val)->val;
-                    } else {
-                        AddError(TStringBuilder() << "VariableSetStmt, expected const for " << value->name << " option");
-                        return nullptr;
-                    }
-                }
-
-                if (NodeTag(val) != T_String) {
+                if (NodeTag(val) != T_A_Const || CAST_NODE(A_Const, val)->isnull || NodeTag(CAST_NODE(A_Const, val)->val) != T_String) {
                     AddError(TStringBuilder() << "VariableSetStmt, expected string literal for " << value->name << " option");
                     return nullptr;
                 }
-                TString rawStr = to_lower(TString(StrVal(val)));
+                TString rawStr = to_lower(TString(StrVal(CAST_NODE(A_Const, val)->val)));
                 if (visitedValues.emplace(rawStr).second) {
                     values.emplace_back(rawStr);
                 }
@@ -2476,10 +2485,10 @@ public:
 
         TVector<TAstNode*> fromList;
         auto p = ParseRangeVar(value->relation);
-        if (!p.Source) {
+        if (!p) {
             return nullptr;
         }
-        AddFrom(p, fromList);
+        AddFrom(*p, fromList);
 
         TAstNode* whereFilter = nullptr;
         if (value->whereClause) {
@@ -2497,7 +2506,7 @@ public:
 
         setItemOptions.push_back(QL(QA("result"), QVL(CreatePgStarResultItem())));
         setItemOptions.push_back(QL(QA("from"), QVL(fromList.data(), fromList.size())));
-        setItemOptions.push_back(QL(QA("join_ops"), QVL(QL())));
+        setItemOptions.push_back(QL(QA("join_ops"), QVL(QL(QL(QA("push"))))));
 
         NYql::TAstNode* lambda = nullptr;
         if (whereFilter) {
@@ -2765,6 +2774,9 @@ public:
                     if (defElem->arg) {
                         switch (NodeTag(defElem->arg))
                         {
+                            case T_Boolean:
+                                options.emplace_back(QL(QAX(nameElem), QA(ToString(boolVal(defElem->arg)))));
+                                break;
                             case T_Integer:
                                 options.emplace_back(QL(QAX(nameElem), QA(ToString(intVal(defElem->arg)))));
                                 break;
@@ -2776,7 +2788,7 @@ public:
                                 if (ListLength(typeName->names) > 0) {
                                     options.emplace_back(QL(QAX(nameElem),
                                         QAX(StrVal(ListNodeNth(typeName->names, ListLength(typeName->names) - 1)))));
-                                    }
+                                }
                                 break;
                             }
                             default:
@@ -2808,7 +2820,165 @@ public:
         return State.Statements.back();
     }
 
-    TFromDesc ParseFromClause(const Node* node) {
+    [[nodiscard]]
+    TAstNode* ParseAlterSeqStmt(const AlterSeqStmt* value) {
+
+        std::vector<TAstNode*> options;
+        TString mode = (value->missing_ok) ? "alter_if_exists" : "alter";
+
+        options.push_back(QL(QA("mode"), QA(mode)));
+
+        auto [sink, key] = ParseQualifiedPgObjectName(
+            value->sequence->catalogname,
+            value->sequence->schemaname,
+            value->sequence->relname,
+            "pgSequence"
+        );
+
+        if (!sink || !key) {
+            return nullptr;
+        }
+
+        for (int i = 0; i < ListLength(value->options); ++i) {
+            auto rawNode = ListNodeNth(value->options, i);
+
+            switch (NodeTag(rawNode)) {
+                case T_DefElem: {
+                    const auto* defElem = CAST_NODE(DefElem, rawNode);
+                    TString nameElem = defElem->defname;
+                    if (defElem->arg) {
+                        switch (NodeTag(defElem->arg))
+                        {
+                            case T_Boolean:
+                                options.emplace_back(QL(QAX(nameElem), QA(ToString(boolVal(defElem->arg)))));
+                                break;
+                            case T_Integer:
+                                options.emplace_back(QL(QAX(nameElem), QA(ToString(intVal(defElem->arg)))));
+                                break;
+                            case T_Float:
+                                options.emplace_back(QL(QAX(nameElem), QA(strVal(defElem->arg))));
+                                break;
+                            case T_TypeName: {
+                                const auto* typeName = CAST_NODE_EXT(PG_TypeName, T_TypeName, defElem->arg);
+                                if (ListLength(typeName->names) > 0) {
+                                    options.emplace_back(QL(QAX(nameElem),
+                                        QAX(StrVal(ListNodeNth(typeName->names, ListLength(typeName->names) - 1)))));
+                                    }
+                                break;
+                            }
+                            default:
+                                NodeNotImplemented(defElem->arg);
+                                return nullptr;
+                        }
+                    }
+                    break;
+                }
+                default:
+                    NodeNotImplemented(rawNode);
+                    return nullptr;
+            }
+        }
+
+        if (value->for_identity) {
+            options.push_back(QL(QA("for_identity")));
+        }
+
+        State.Statements.push_back(
+                L(A("let"), A("world"),
+                  L(A("Write!"), A("world"), sink, key, L(A("Void")),
+                    QVL(options.data(), options.size()))));
+
+        return State.Statements.back();
+    }
+
+    [[nodiscard]] 
+    TAstNode* ParseAlterTableStmt(const AlterTableStmt* value) {
+        std::vector<TAstNode*> options;
+        TString mode = (value->missing_ok) ? "alter_if_exists" : "alter";
+
+        options.push_back(QL(QA("mode"), QA(mode)));
+
+        const auto [sink, key] = ParseWriteRangeVar(value->relation, true);
+        if (!sink || !key) {
+            return nullptr;
+        }
+
+        std::vector<TAstNode*> alterColumns;
+        for (int i = 0; i < ListLength(value->cmds); ++i) {
+            auto rawNode = ListNodeNth(value->cmds, i);
+
+            const auto* cmd = CAST_NODE(AlterTableCmd, rawNode);
+            switch (cmd->subtype) {
+                case AT_ColumnDefault: { /* ALTER COLUMN DEFAULT */
+                    const auto* def = cmd->def;
+                    const auto* colName = cmd->name;
+                    switch (NodeTag(def)) {
+                        case T_FuncCall: {
+                            const auto* newDefault = CAST_NODE(FuncCall, def);
+                            const auto* funcName = ListNodeNth(newDefault->funcname, 0);
+                            if (NodeTag(funcName) != T_String) {
+                                NodeNotImplemented(newDefault, funcName);
+                                return nullptr;
+                            }
+                            auto strFuncName = StrVal(funcName);
+                            if (strcmp(strFuncName, "nextval") != 0) {
+                                NodeNotImplemented(newDefault, funcName);
+                                return nullptr;
+                            }
+                            const auto* rawArg = ListNodeNth(newDefault->args, 0);
+                            if (NodeTag(rawArg) != T_TypeCast && NodeTag(rawArg) != T_A_Const) {
+                                AddError(TStringBuilder() << "Expected type cast node or a_const, but got something wrong: " << NodeTag(rawArg));
+                                return nullptr;
+                            }
+                            const A_Const* localConst = nullptr;
+                            if (NodeTag(rawArg) == T_TypeCast) { 
+                                auto localCast = CAST_NODE(TypeCast, rawArg)->arg;
+                                if (NodeTag(localCast) != T_A_Const) {
+                                    AddError(TStringBuilder() << "Expected a_const in cast, but got something wrong: " << NodeTag(localCast));
+                                    return nullptr;
+                                }
+                                localConst = CAST_NODE(A_Const, localCast);
+                            } else {
+                                localConst = CAST_NODE(A_Const, rawArg);
+                            }
+                            if (NodeTag(localConst->val) != T_String) {
+                                AddError(TStringBuilder() << "Expected string in const, but got something wrong: " << NodeTag(localConst->val));
+                                return nullptr;
+                            }
+                            auto seqName = StrVal(localConst->val);
+
+                            alterColumns.push_back(QL(QAX(colName), QL(QA("setDefault"), QL(QA("nextval"), QA(seqName)))));
+                            break;
+                        }
+                        default:
+                            NodeNotImplemented(def);
+                            return nullptr;
+                    }
+			        break;
+                }
+                default:
+                    NodeNotImplemented(rawNode);
+                    return nullptr;
+            }
+        }
+
+        std::vector<TAstNode*> actions { QL(QA("alterColumns"), QVL(alterColumns.data(), alterColumns.size())) };
+
+        options.push_back(
+            QL(QA("actions"), 
+               QVL(actions.data(), actions.size())
+            )
+        );
+
+        State.Statements.push_back(
+                L(A("let"), A("world"),
+                  L(A("Write!"), A("world"), sink, key, L(A("Void")),
+                    QVL(options.data(), options.size()))));
+
+        return State.Statements.back();
+    }
+
+    TMaybe<TFromDesc> ParseFromClause(const Node* node) {
         switch (NodeTag(node)) {
         case T_RangeVar:
             return ParseRangeVar(CAST_NODE(RangeVar, node));
@@ -2837,7 +3007,12 @@ public:
             fromList.push_back(QL(L(A("Right!"), A(label)), aliasNode, colNamesTuple));
             ++State.ReadIndex;
         } else {
-            fromList.push_back(QL(p.Source, aliasNode, colNamesTuple));
+            auto source = p.Source;
+            if (!source) {
+                source = L(A("PgSelf"));
+            }
+
+            fromList.push_back(QL(source, aliasNode, colNamesTuple));
         }
     }
 
@@ -2961,7 +3136,7 @@ public:
                                         /* isSink */ true, isScheme);
     }
 
-    TFromDesc ParseRangeVar(const RangeVar* value) {
+    TMaybe<TFromDesc> ParseRangeVar(const RangeVar* value) {
         AT_LOCATION(value);
 
         const TView* view = nullptr;
@@ -2973,6 +3148,10 @@ public:
                     break;
                 }
             }
+            if (!view && State.CurrentRecursiveView && State.CurrentRecursiveView->Name == value->relname) {
+                view = State.CurrentRecursiveView;
+            }
+
             if (!view) {
                 auto viewIt = State.Views.find(value->relname);
                 if (viewIt != State.Views.end()) {
@@ -2992,7 +3171,7 @@ public:
         }
 
         if (view) {
-            return { view->Source, alias, colnames.empty() ? view->ColNames : colnames, false };
+            return TFromDesc{view->Source, alias, colnames.empty() ? view->ColNames : colnames, false };
         }
 
         TString schemaname = value->schemaname;
@@ -3018,7 +3197,7 @@ public:
                 if (!s) {
                     return {};
                 }
-                return { s, alias, colnames, true };
+                return TFromDesc{ s, alias, colnames, true };
             }
         }
 
@@ -3038,7 +3217,7 @@ public:
             L(A("Void")),
             QL()
         );
-        return {
+        return TFromDesc {
             readExpr,
             alias,
             colnames,
@@ -3098,7 +3277,7 @@ public:
                 );
     }
 
-    TFromDesc ParseRangeFunction(const RangeFunction* value) {
+    TMaybe<TFromDesc> ParseRangeFunction(const RangeFunction* value) {
         if (value->lateral) {
             AddError("RangeFunction: unsupported lateral");
             return {};
@@ -3159,10 +3338,10 @@ public:
             return {};
         }
 
-        return { func, alias, colnames, false };
+        return TFromDesc{ func, alias, colnames, false };
     }
 
-    TFromDesc ParseRangeSubselect(const RangeSubselect* value) {
+    TMaybe<TFromDesc> ParseRangeSubselect(const RangeSubselect* value) {
         if (value->lateral) {
             AddError("RangeSubselect: unsupported lateral");
             return {};
@@ -3189,7 +3368,7 @@ public:
             return {};
         }
 
-        return { ParseSelectStmt(CAST_NODE(SelectStmt, value->subquery), true), alias, colnames, false };
+        return TFromDesc{ ParseSelectStmt(CAST_NODE(SelectStmt, value->subquery), { .Inner = true }), alias, colnames, false };
     }
 
     TAstNode* ParseNullTestExpr(const NullTest* value, const TExprSettings& settings) {
@@ -3323,8 +3502,14 @@ public:
         case SVFOP_CURRENT_ROLE:
         case SVFOP_USER:
             return L(A("PgConst"), QA("postgres"), L(A("PgType"), QA("name")));
-        case SVFOP_CURRENT_CATALOG:
-            return L(A("PgConst"), QA("postgres"), L(A("PgType"), QA("name")));
+        case SVFOP_CURRENT_CATALOG: {
+            std::optional<TString> database;
+            if (Settings.GUCSettings) {
+                database = Settings.GUCSettings->Get("ydb_database");
+            }
+
+            return L(A("PgConst"), QA(database ? *database : "postgres"), L(A("PgType"), QA("name")));
+        }
         case SVFOP_CURRENT_SCHEMA: {
             std::optional<TString> searchPath;
             if (Settings.GUCSettings) {
@@ -3452,8 +3637,18 @@ public:
 
     TMaybe<TPgConst> GetValueNType(const A_Const* value) {
         TPgConst pgConst;
+        if (value->isnull) {
+            pgConst.type = TPgConst::Type::nil;
+            return pgConst;
+        }
+
         const auto& val = value->val;
         switch (NodeTag(val)) {
+            case T_Boolean: {
+                pgConst.value = BoolVal(val) ? "t" : "f";
+                pgConst.type = TPgConst::Type::boolean;
+                return pgConst;
+            }
             case T_Integer: {
                 pgConst.value = ToString(IntVal(val));
                 pgConst.type = TPgConst::Type::int4;
@@ -3477,12 +3672,8 @@ public:
                 pgConst.type = TPgConst::Type::bit;
                 return pgConst;
             }
-            case T_Null: {
-                pgConst.type = TPgConst::Type::nil;
-                return pgConst;
-            }
             default: {
-                ValueNotImplemented(value, val);
+                NodeNotImplemented((const Node*)value);
                 return {};
             }
         }
@@ -3517,7 +3708,7 @@ public:
             return nullptr;
         }
 
-        TAstNode* pgTypeNode = NodeTag(val) != T_Null
+        TAstNode* pgTypeNode = !value->isnull
             ? L(A("PgType"), QA(TPgConst::ToString(valueNType->type)))
             : L(A("PgType"), QA("unknown"));
 
@@ -3525,20 +3716,22 @@ public:
             return AutoParametrizeConst(std::move(valueNType.GetRef()), pgTypeNode);
         }
 
+        if (value->isnull) {
+            return L(A("PgCast"), L(A("Null")), pgTypeNode);
+        }
+
         switch (NodeTag(val)) {
             case T_Integer:
             case T_Float: {
                 return L(A("PgConst"), QA(valueNType->value.GetRef()), pgTypeNode);
             }
+            case T_Boolean:
             case T_String:
             case T_BitString: {
                 return L(A("PgConst"), QAX(valueNType->value.GetRef()), pgTypeNode);
             }
-            case T_Null: {
-                return L(A("PgCast"), L(A("Null")), pgTypeNode);
-            }
             default: {
-                ValueNotImplemented(value, val);
+                NodeNotImplemented((const Node*)value);
                 return nullptr;
             }
         }
@@ -3735,7 +3928,7 @@ public:
             rowTest = L(A("Void"));
         }
 
-        auto select = ParseSelectStmt(CAST_NODE(SelectStmt, value->subselect), true);
+        auto select = ParseSelectStmt(CAST_NODE(SelectStmt, value->subselect), {.Inner = true});
         if (!select) {
             return nullptr;
         }
@@ -3942,7 +4135,7 @@ public:
 
         if (NodeTag(arg) == T_A_Const &&
             (NodeTag(CAST_NODE(A_Const, arg)->val) == T_String ||
-            NodeTag(CAST_NODE(A_Const, arg)->val) == T_Null) &&
+            CAST_NODE(A_Const, arg)->isnull) &&
             supportedTypeName &&
             typeName->typemod == -1 &&
             ListLength(typeName->typmods) == 0 &&
@@ -4006,7 +4199,7 @@ public:
 
                         auto aConst = CAST_NODE(A_Const, typeMod);
                         TString s;
-                        if (!ValueAsString(aConst->val, s)) {
+                        if (!ValueAsString(aConst->val, aConst->isnull, s)) {
                             AddError("Unsupported format of typmod");
                             return nullptr;
                         }
@@ -4603,18 +4796,21 @@ public:
         }
 
         auto lst = CAST_NODE(List, value->rexpr);
-        TVector<TAstNode*> listItems;
-        listItems.push_back(A("AsList"));
+
+        TVector<TAstNode*> children;
+        children.reserve(2 + ListLength(lst));
+
+        children.push_back(A("PgIn"));
+        children.push_back(lhs);
         for (int item = 0; item < ListLength(lst); ++item) {
             auto cell = ParseExpr(ListNodeNth(lst, item), settings);
             if (!cell) {
                 return nullptr;
             }
-
-            listItems.push_back(cell);
+            children.push_back(cell);
         }
 
-        auto ret = L(A("PgIn"), lhs, VL(listItems.data(), listItems.size()));
+        auto ret = VL(children.data(), children.size());
         if (op[0] == '<') {
             ret = L(A("PgNot"), ret);
         }
@@ -4723,20 +4919,6 @@ public:
     void NodeNotImplemented(const T* outer, const Node* nodeptr) {
         Y_UNUSED(outer);
         NodeNotImplementedImpl<T>(nodeptr);
-    }
-
-    template <typename T>
-    void ValueNotImplementedImpl(const Value& value) {
-        TStringBuilder b;
-        b << TypeName<T>() << ": ";
-        b << "alternative is not implemented yet : " << NodeTag(value);
-        AddError(b);
-    }
-
-    template <typename T>
-    void ValueNotImplemented(const T* outer, const Value& value) {
-        Y_UNUSED(outer);
-        ValueNotImplementedImpl<T>(value);
     }
 
     void NodeNotImplemented(const Node* nodeptr) {

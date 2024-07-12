@@ -20,7 +20,6 @@
 
 #include <ydb/core/blockstore/core/blockstore.h>
 #include <ydb/core/filestore/core/filestore.h>
-#include <ydb/services/bg_tasks/service.h>
 
 #include <util/generic/ptr.h>
 #include <util/generic/set.h>
@@ -41,7 +40,6 @@
     action(TEvDataShard::TEvSplitPartitioningChangedAck,  NSchemeShard::TXTYPE_SPLIT_PARTITIONING_CHANGED_DST_ACK) \
 \
     action(TEvColumnShard::TEvProposeTransactionResult,   NSchemeShard::TXTYPE_COLUMNSHARD_PROPOSE_RESULT)              \
-    action(NBackgroundTasks::TEvAddTaskResult,            NSchemeShard::TXTYPE_ADD_BACKGROUND_TASK_RESULT)              \
     action(TEvColumnShard::TEvNotifyTxCompletionResult,   NSchemeShard::TXTYPE_COLUMNSHARD_NOTIFY_TX_COMPLETION_RESULT) \
 \
     action(NSequenceShard::TEvSequenceShard::TEvCreateSequenceResult,   NSchemeShard::TXTYPE_SEQUENCESHARD_CREATE_SEQUENCE_RESULT)   \
@@ -420,6 +418,12 @@ ISubOperation::TPtr CreateDropCdcStreamImpl(TOperationId id, TTxState::ETxState 
 ISubOperation::TPtr CreateDropCdcStreamAtTable(TOperationId id, const TTxTransaction& tx, bool dropSnapshot);
 ISubOperation::TPtr CreateDropCdcStreamAtTable(TOperationId id, TTxState::ETxState state, bool dropSnapshot);
 
+/// Continuous Backup
+// Create
+TVector<ISubOperation::TPtr> CreateNewContinuousBackup(TOperationId id, const TTxTransaction& tx, TOperationContext& context);
+TVector<ISubOperation::TPtr> CreateAlterContinuousBackup(TOperationId id, const TTxTransaction& tx, TOperationContext& context);
+TVector<ISubOperation::TPtr> CreateDropContinuousBackup(TOperationId id, const TTxTransaction& tx, TOperationContext& context);
+
 ISubOperation::TPtr CreateBackup(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateBackup(TOperationId id, TTxState::ETxState state);
 
@@ -588,13 +592,15 @@ ISubOperation::TPtr CreateDropSequence(TOperationId id, const TTxTransaction& tx
 ISubOperation::TPtr CreateDropSequence(TOperationId id, TTxState::ETxState state);
 ISubOperation::TPtr CreateCopySequence(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateCopySequence(TOperationId id, TTxState::ETxState state);
+ISubOperation::TPtr CreateAlterSequence(TOperationId id, const TTxTransaction& tx);
+ISubOperation::TPtr CreateAlterSequence(TOperationId id, TTxState::ETxState state);
 
 ISubOperation::TPtr CreateNewReplication(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateNewReplication(TOperationId id, TTxState::ETxState state);
 ISubOperation::TPtr CreateAlterReplication(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateAlterReplication(TOperationId id, TTxState::ETxState state);
-ISubOperation::TPtr CreateDropReplication(TOperationId id, const TTxTransaction& tx);
-ISubOperation::TPtr CreateDropReplication(TOperationId id, TTxState::ETxState state);
+ISubOperation::TPtr CreateDropReplication(TOperationId id, const TTxTransaction& tx, bool cascade);
+ISubOperation::TPtr CreateDropReplication(TOperationId id, TTxState::ETxState state, bool cascade);
 
 ISubOperation::TPtr CreateNewBlobDepot(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateNewBlobDepot(TOperationId id, TTxState::ETxState state);
@@ -602,6 +608,17 @@ ISubOperation::TPtr CreateAlterBlobDepot(TOperationId id, const TTxTransaction& 
 ISubOperation::TPtr CreateAlterBlobDepot(TOperationId id, TTxState::ETxState state);
 ISubOperation::TPtr CreateDropBlobDepot(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateDropBlobDepot(TOperationId id, TTxState::ETxState state);
+
+// Resource Pool
+// Create
+ISubOperation::TPtr CreateNewResourcePool(TOperationId id, const TTxTransaction& tx);
+ISubOperation::TPtr CreateNewResourcePool(TOperationId id, TTxState::ETxState state);
+// Alter
+ISubOperation::TPtr CreateAlterResourcePool(TOperationId id, const TTxTransaction& tx);
+ISubOperation::TPtr CreateAlterResourcePool(TOperationId id, TTxState::ETxState state);
+// Drop
+ISubOperation::TPtr CreateDropResourcePool(TOperationId id, const TTxTransaction& tx);
+ISubOperation::TPtr CreateDropResourcePool(TOperationId id, TTxState::ETxState state);
 
 }
 }

@@ -198,6 +198,8 @@ public:
 private:
     EStage Stage = EStage::Created;
     std::shared_ptr<NDataLocks::TManager::TGuard> LockGuard;
+    TString AbortedReason;
+
 protected:
     virtual void DoDebugString(TStringOutput& out) const = 0;
     virtual void DoCompile(TFinalizationContext& context) = 0;
@@ -211,7 +213,6 @@ protected:
     virtual void DoStart(NColumnShard::TColumnShard& self) = 0;
     virtual TConclusionStatus DoConstructBlobs(TConstructionContext& context) noexcept = 0;
     virtual void OnAbortEmergency() {
-
     }
 
     TBlobsAction BlobsAction;
@@ -231,6 +232,10 @@ public:
         virtual ui64 AddPortion(const TPortionInfo& portionInfo) = 0;
         virtual ~IMemoryPredictor() = default;
     };
+
+    virtual bool NeedDiskWriteLimiter() const {
+        return false;
+    }
 
     void OnFinish(NColumnShard::TColumnShard& self, TChangesFinishContext& context);
 
@@ -270,7 +275,7 @@ public:
     void Start(NColumnShard::TColumnShard& self);
 
     virtual ui32 GetWritePortionsCount() const = 0;
-    virtual TWritePortionInfoWithBlobs* GetWritePortionInfo(const ui32 index) = 0;
+    virtual TWritePortionInfoWithBlobsResult* GetWritePortionInfo(const ui32 index) = 0;
     virtual bool NeedWritePortion(const ui32 index) const = 0;
 
     void WriteIndexOnExecute(NColumnShard::TColumnShard* self, TWriteIndexContext& context);

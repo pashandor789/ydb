@@ -1,18 +1,6 @@
 /* src/include/pg_config.h.  Generated from pg_config.h.in by configure.  */
 /* src/include/pg_config.h.in.  Generated from configure.ac by autoheader.  */
 
-/* Define to the type of arg 1 of 'accept' */
-#define ACCEPT_TYPE_ARG1 int
-
-/* Define to the type of arg 2 of 'accept' */
-#define ACCEPT_TYPE_ARG2 struct sockaddr *
-
-/* Define to the type of arg 3 of 'accept' */
-#define ACCEPT_TYPE_ARG3 socklen_t
-
-/* Define to the return type of 'accept' */
-#define ACCEPT_TYPE_RETURN int
-
 /* Define if building universal (internal helper macro) */
 /* #undef AC_APPLE_UNIVERSAL_BUILD */
 
@@ -44,7 +32,7 @@
 #define BLCKSZ 8192
 
 /* Saved arguments from configure */
-#define CONFIGURE_ARGS " '--prefix=/var/empty/postgresql-14.2' '--with-openssl' '--with-libxml' '--sysconfdir=/etc' '--libdir=$(lib)/lib' '--with-system-tzdata=/var/empty/tzdata-2021c/share/zoneinfo' '--enable-debug' '--with-systemd' '--with-ossp-uuid' '--with-icu' '--with-lz4' '--with-gssapi' '--without-gssapi' '--without-systemd' 'CC=cc' 'CXX=g++' 'PKG_CONFIG=pkg-config' 'PKG_CONFIG_PATH=/var/empty/zlib-1.2.11-dev/lib/pkgconfig:/var/empty/ncurses-6.2-dev/lib/pkgconfig:/var/empty/openssl-1.1.1l-dev/lib/pkgconfig:/var/empty/libxml2-2.9.12-dev/lib/pkgconfig:/var/empty/icu4c-70.1-dev/lib/pkgconfig:/var/empty/lz4-1.9.3-dev/lib/pkgconfig:/var/empty/systemd-249.5-dev/lib/pkgconfig:/var/empty/systemd-249.5-dev/share/pkgconfig:/var/empty/libkrb5-1.18-dev/lib/pkgconfig:/var/empty/libossp-uuid-1.6.2/lib/pkgconfig'"
+#define CONFIGURE_ARGS " '--with-openssl' '--with-icu' '--with-libxml' '--enable-debug' '--without-systemd' '--without-gssapi' '--with-lz4' '--with-ossp-uuid' 'CC=clang' 'CFLAGS=-ffunction-sections -fdata-sections -DWAIT_USE_SELF_PIPE'"
 
 /* Define to the default TCP port number on which the server listens and to
    which clients will try to connect. This can be overridden at run-time, but
@@ -54,6 +42,9 @@
 
 /* Define to the default TCP port number as a string constant. */
 #define DEF_PGPORT_STR "5432"
+
+/* Define to the file name extension of dynamically-loadable modules. */
+#define DLSUFFIX ".so"
 
 /* Define to build with GSSAPI support. (--with-gssapi) */
 /* #undef ENABLE_GSS */
@@ -86,9 +77,6 @@
 
 /* Define to 1 if you have the `backtrace_symbols' function. */
 #undef HAVE_BACKTRACE_SYMBOLS
-
-/* Define to 1 if you have the `BIO_get_data' function. */
-#define HAVE_BIO_GET_DATA 1
 
 /* Define to 1 if you have the `BIO_meth_new' function. */
 #define HAVE_BIO_METH_NEW 1
@@ -158,6 +146,10 @@
 /* Define to 1 if you have the declaration of `RTLD_NOW', and to 0 if you
    don't. */
 #define HAVE_DECL_RTLD_NOW 1
+
+/* Define to 1 if you have the declaration of `sigwait', and to 0 if you
+   don't. */
+#define HAVE_DECL_SIGWAIT 1
 
 /* Define to 1 if you have the declaration of `strlcat', and to 0 if you
    don't. */
@@ -289,6 +281,9 @@
 /* Define to 1 if you have the `inet_aton' function. */
 #define HAVE_INET_ATON 1
 
+/* Define to 1 if you have the `inet_pton' function. */
+#define HAVE_INET_PTON 1
+
 /* Define to 1 if the system has the type `int64'. */
 /* #undef HAVE_INT64 */
 
@@ -361,6 +356,9 @@
 /* Define to 1 if you have the `z' library (-lz). */
 #define HAVE_LIBZ 1
 
+/* Define to 1 if you have the `zstd' library (-lzstd). */
+/* #undef HAVE_LIBZSTD */
+
 /* Define to 1 if you have the `link' function. */
 #define HAVE_LINK 1
 
@@ -372,9 +370,6 @@
 
 /* Define to 1 if `long long int' works and is 64 bits. */
 /* #undef HAVE_LONG_LONG_INT_64 */
-
-/* Define to 1 if you have the <lz4.h> header file. */
-#define HAVE_LZ4_H 1
 
 /* Define to 1 if you have the <mbarrier.h> header file. */
 /* #undef HAVE_MBARRIER_H */
@@ -415,6 +410,9 @@
 /* Define to 1 if you have the <poll.h> header file. */
 #define HAVE_POLL_H 1
 
+/* Define to 1 if you have a POSIX-conforming sigwait declaration. */
+#define HAVE_POSIX_DECL_SIGWAIT 1
+
 /* Define to 1 if you have the `posix_fadvise' function. */
 #define HAVE_POSIX_FADVISE 1
 
@@ -451,9 +449,6 @@
 /* Define to 1 if you have the `pwrite' function. */
 #define HAVE_PWRITE 1
 
-/* Define to 1 if you have the `random' function. */
-#define HAVE_RANDOM 1
-
 /* Define to 1 if you have the <readline.h> header file. */
 /* #undef HAVE_READLINE_H */
 
@@ -468,10 +463,6 @@
 
 /* Define to 1 if you have the `readv' function. */
 #define HAVE_READV 1
-
-/* Define to 1 if you have the global variable
-   'rl_completion_append_character'. */
-#define HAVE_RL_COMPLETION_APPEND_CHARACTER 1
 
 /* Define to 1 if you have the `rl_completion_matches' function. */
 #define HAVE_RL_COMPLETION_MATCHES 1
@@ -494,6 +485,9 @@
 /* Define to 1 if you have the `rl_reset_screen_size' function. */
 #define HAVE_RL_RESET_SCREEN_SIZE 1
 
+/* Define to 1 if you have the `rl_variable_bind' function. */
+#define HAVE_RL_VARIABLE_BIND 1
+
 /* Define to 1 if you have the <security/pam_appl.h> header file. */
 /* #undef HAVE_SECURITY_PAM_APPL_H */
 
@@ -512,11 +506,11 @@
 /* Define to 1 if you have the `shm_open' function. */
 #define HAVE_SHM_OPEN 1
 
+/* Define to 1 if the system has the type `socklen_t'. */
+#define HAVE_SOCKLEN_T 1
+
 /* Define to 1 if you have spinlocks. */
 #define HAVE_SPINLOCKS 1
-
-/* Define to 1 if you have the `srandom' function. */
-#define HAVE_SRANDOM 1
 
 /* Define to 1 if stdbool.h conforms to C99. */
 #define HAVE_STDBOOL_H 1
@@ -644,6 +638,9 @@
 /* Define to 1 if you have the <sys/shm.h> header file. */
 #define HAVE_SYS_SHM_H 1
 
+/* Define to 1 if you have the <sys/signalfd.h> header file. */
+/* #undef HAVE_SYS_SIGNALFD_H */
+
 /* Define to 1 if you have the <sys/sockio.h> header file. */
 /* #undef HAVE_SYS_SOCKIO_H */
 
@@ -749,6 +746,9 @@
 /* Define to 1 if your compiler understands __builtin_ctz. */
 #define HAVE__BUILTIN_CTZ 1
 
+/* Define to 1 if your compiler understands __builtin_frame_address. */
+/* #undef HAVE__BUILTIN_FRAME_ADDRESS */ /* problems with sanitizers */
+
 /* Define to 1 if your compiler understands __builtin_$op_overflow. */
 #define HAVE__BUILTIN_OP_OVERFLOW 1
 
@@ -802,7 +802,7 @@
 #define PACKAGE_NAME "PostgreSQL"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "PostgreSQL 14.2"
+#define PACKAGE_STRING "PostgreSQL 15.7"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "postgresql"
@@ -811,7 +811,7 @@
 #define PACKAGE_URL "https://www.postgresql.org/"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "14.2"
+#define PACKAGE_VERSION "15.7"
 
 /* Define to the name of a signed 128-bit integer type. */
 #define PG_INT128_TYPE __int128
@@ -824,13 +824,13 @@
 #define PG_KRB_SRVNAM "postgres"
 
 /* PostgreSQL major version as a string */
-#define PG_MAJORVERSION "14"
+#define PG_MAJORVERSION "15"
 
 /* PostgreSQL major version number */
-#define PG_MAJORVERSION_NUM 14
+#define PG_MAJORVERSION_NUM 15
 
 /* PostgreSQL minor version number */
-#define PG_MINORVERSION_NUM 2
+#define PG_MINORVERSION_NUM 7
 
 /* Define to best printf format archetype, usually gnu_printf if available. */
 #define PG_PRINTF_ATTRIBUTE gnu_printf
@@ -839,13 +839,13 @@
 #define PG_USE_STDBOOL 1
 
 /* PostgreSQL version as a string */
-#define PG_VERSION "14.2"
+#define PG_VERSION "15.7"
 
 /* PostgreSQL version as a number */
-#define PG_VERSION_NUM 140002
+#define PG_VERSION_NUM 150007
 
 /* A string containing the version number, platform, and C compiler */
-#define PG_VERSION_STR "PostgreSQL 14.2 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 10.3.0, 64-bit"
+#define PG_VERSION_STR "PostgreSQL 15.7 on x86_64-pc-linux-gnu, compiled by clang version 16.0.6, 64-bit"
 
 /* Define to 1 to allow profiling output to be saved separately for each
    process. */
@@ -958,6 +958,9 @@
 
 /* Define to select Win32-style shared memory. */
 /* #undef USE_WIN32_SHARED_MEMORY */
+
+/* Define to 1 to build with ZSTD support. (--with-zstd) */
+/* #undef USE_ZSTD */
 
 /* Define to 1 if `wcstombs_l' requires <xlocale.h>. */
 /* #undef WCSTOMBS_L_IN_XLOCALE */

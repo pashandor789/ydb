@@ -36,6 +36,10 @@ struct TExternalDataSource : public IExternalSource {
         ythrow TExternalSourceException() << "Only external table supports parameters";
     }
 
+    bool IsRDBMSDataSource(const TProtoStringType& sourceType) const {
+        return IsIn({"Greenplum", "PostgreSQL", "MySQL", "MsSQLServer", "Clickhouse"}, sourceType);
+    }
+
     virtual void ValidateExternalDataSource(const TString& externalDataSourceDescription) const override {
         NKikimrSchemeOp::TExternalDataSourceDescription proto;
         if (!proto.ParseFromString(externalDataSourceDescription)) {
@@ -49,7 +53,19 @@ struct TExternalDataSource : public IExternalSource {
             ythrow TExternalSourceException() << "Unsupported property: " << key;
         }
 
+        if (IsRDBMSDataSource(proto.GetSourceType()) && !proto.GetProperties().GetProperties().contains("database_name")){
+            ythrow TExternalSourceException() << proto.GetSourceType() << " source must provide database_name";
+        }
+
         ValidateHostname(HostnamePatterns, proto.GetLocation());
+    }
+
+    virtual NThreading::TFuture<std::shared_ptr<TMetadata>> LoadDynamicMetadata(std::shared_ptr<TMetadata> meta) override {
+        return NThreading::MakeFuture(std::move(meta));
+    }
+
+    virtual bool CanLoadDynamicMetadata() const override {
+        return false;
     }
 
 private:

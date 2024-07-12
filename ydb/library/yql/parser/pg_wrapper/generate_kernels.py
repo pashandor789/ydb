@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import os
@@ -349,6 +349,7 @@ def main():
                 '#undef fopen\n'
                 '#undef bind\n'
                 '#undef locale_t\n'
+                '#undef strtou64\n'
                 '}\n'
                 '\n'
                 '#include "arrow.h"\n'

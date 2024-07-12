@@ -3,7 +3,7 @@
  * parse_utilcmd.c
  *	  Perform parse analysis work for various utility commands
  *
- * Formerly we did this work during parse_analyze() in analyze.c.  However
+ * Formerly we did this work during parse_analyze_*() in analyze.c.  However
  * that is fairly unsafe in the presence of querytree caching, since any
  * database state that we depend on in making the transformations might be
  * obsolete by the time the utility command is executed; and utility commands
@@ -12,7 +12,7 @@
  * respective utility commands.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *	src/backend/parser/parse_utilcmd.c
@@ -95,12 +95,10 @@ typedef struct
 	bool		ofType;			/* true if statement contains OF typename */
 } CreateStmtContext;
 
-/* State shared by transformCreateSchemaStmt and its subroutines */
+/* State shared by transformCreateSchemaStmtElements and its subroutines */
 typedef struct
 {
-	const char *stmtType;		/* "CREATE SCHEMA" or "ALTER SCHEMA" */
-	char	   *schemaname;		/* name of schema */
-	RoleSpec   *authrole;		/* owner of schema */
+	const char *schemaname;		/* name of schema */
 	List	   *sequences;		/* CREATE SEQUENCE items */
 	List	   *tables;			/* CREATE TABLE items */
 	List	   *views;			/* CREATE VIEW items */
@@ -134,7 +132,7 @@ static void transformCheckConstraints(CreateStmtContext *cxt,
 static void transformConstraintAttrs(CreateStmtContext *cxt,
 									 List *constraintList);
 static void transformColumnType(CreateStmtContext *cxt, ColumnDef *column);
-static void setSchemaName(char *context_schema, char **stmt_schema_name);
+static void setSchemaName(const char *context_schema, char **stmt_schema_name);
 static void transformPartitionCmd(CreateStmtContext *cxt, PartitionCmd *cmd);
 static List *transformPartitionRangeBounds(ParseState *pstate, List *blist,
 										   Relation parent);
@@ -196,6 +194,16 @@ transformCreateStmt(CreateStmt *stmt, const char *queryString)
 	 */
 	if (stmt->if_not_exists && OidIsValid(existing_relid))
 	{
+		/*
+		 * If we are in an extension script, insist that the pre-existing
+		 * object be a member of the extension, to avoid security risks.
+		 */
+		ObjectAddress address;
+
+		ObjectAddressSet(address, RelationRelationId, existing_relid);
+		checkMembershipInCurrentExtension(&address);
+
+		/* OK to skip */
 		ereport(NOTICE,
 				(errcode(ERRCODE_DUPLICATE_TABLE),
 				 errmsg("relation \"%s\" already exists, skipping",
@@ -371,6 +379,9 @@ generateSerialExtraStmts(CreateStmtContext *cxt, ColumnDef *column,
 	List	   *attnamelist;
 	int			nameEl_idx = -1;
 
+	/* Make a copy of this as we may end up modifying it in the code below */
+	seqoptions = list_copy(seqoptions);
+
 	/*
 	 * Determine namespace and name to use for the sequence.
 	 *
@@ -392,9 +403,7 @@ generateSerialExtraStmts(CreateStmtContext *cxt, ColumnDef *column,
 		if (strcmp(defel->defname, "sequence_name") == 0)
 		{
 			if (nameEl)
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("conflicting or redundant options")));
+				errorConflictingDefElem(defel, cxt->pstate);
 			nameEl = defel;
 			nameEl_idx = foreach_current_index(option);
 		}
@@ -447,6 +456,16 @@ generateSerialExtraStmts(CreateStmtContext *cxt, ColumnDef *column,
 	seqstmt = makeNode(CreateSeqStmt);
 	seqstmt->for_identity = for_identity;
 	seqstmt->sequence = makeRangeVar(snamespace, sname, -1);
+
+	/*
+	 * Copy the persistence of the table.  For CREATE TABLE, we get the
+	 * persistence from cxt->relation, which comes from the CreateStmt in
+	 * progress.  For ALTER TABLE, the parser won't set
+	 * cxt->relation->relpersistence, but we have cxt->rel as the existing
+	 * table, so we copy the persistence from there.
+	 */
+	seqstmt->sequence->relpersistence = cxt->rel ? cxt->rel->rd_rel->relpersistence : cxt->relation->relpersistence;
+
 	seqstmt->options = seqoptions;
 
 	/*
@@ -604,8 +623,8 @@ transformColumnDefinition(CreateStmtContext *cxt, ColumnDef *column)
 		 */
 		qstring = quote_qualified_identifier(snamespace, sname);
 		snamenode = makeNode(A_Const);
-		snamenode->val.type = T_String;
-		snamenode->val.val.str = qstring;
+		snamenode->val.node.type = T_String;
+		snamenode->val.sval.sval = qstring;
 		snamenode->location = -1;
 		castnode = makeNode(TypeCast);
 		castnode->typeName = SystemTypeName("regclass");
@@ -976,8 +995,9 @@ transformTableLikeClause(CreateStmtContext *cxt, TableLikeClause *table_like_cla
 		relation->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a table, view, materialized view, composite type, or foreign table",
-						RelationGetRelationName(relation))));
+				 errmsg("relation \"%s\" is invalid in LIKE clause",
+						RelationGetRelationName(relation)),
+				 errdetail_relkind_not_supported(relation->rd_rel->relkind)));
 
 	cancel_parser_errposition_callback(&pcbstate);
 
@@ -1485,7 +1505,7 @@ transformOfType(CreateStmtContext *cxt, TypeName *ofTypename)
 		n->location = -1;
 		cxt->columns = lappend(cxt->columns, n);
 	}
-	DecrTupleDescRefCount(tupdesc);
+	ReleaseTupleDesc(tupdesc);
 
 	ReleaseSysCache(tuple);
 }
@@ -1582,6 +1602,7 @@ generateClonedIndexStmt(RangeVar *heapRel, Relation source_idx,
 	index->oldCreateSubid = InvalidSubTransactionId;
 	index->oldFirstRelfilenodeSubid = InvalidSubTransactionId;
 	index->unique = idxrec->indisunique;
+	index->nulls_not_distinct = idxrec->indnullsnotdistinct;
 	index->primary = idxrec->indisprimary;
 	index->transformed = true;	/* don't need transformIndexStmt */
 	index->concurrent = false;
@@ -2113,6 +2134,7 @@ transformIndexConstraints(CreateStmtContext *cxt)
 				equal(index->whereClause, priorindex->whereClause) &&
 				equal(index->excludeOpNames, priorindex->excludeOpNames) &&
 				strcmp(index->accessMethod, priorindex->accessMethod) == 0 &&
+				index->nulls_not_distinct == priorindex->nulls_not_distinct &&
 				index->deferrable == priorindex->deferrable &&
 				index->initdeferred == priorindex->initdeferred)
 			{
@@ -2179,6 +2201,7 @@ transformIndexConstraint(Constraint *constraint, CreateStmtContext *cxt)
 		 * DefineIndex will check for it.
 		 */
 	}
+	index->nulls_not_distinct = constraint->nulls_not_distinct;
 	index->isconstraint = true;
 	index->deferrable = constraint->deferrable;
 	index->initdeferred = constraint->initdeferred;
@@ -2425,7 +2448,7 @@ transformIndexConstraint(Constraint *constraint, CreateStmtContext *cxt)
 			/* Make sure referenced column exists. */
 			foreach(columns, cxt->columns)
 			{
-				column = castNode(ColumnDef, lfirst(columns));
+				column = lfirst_node(ColumnDef, columns);
 				if (strcmp(column->colname, key) == 0)
 				{
 					found = true;
@@ -2463,7 +2486,7 @@ transformIndexConstraint(Constraint *constraint, CreateStmtContext *cxt)
 
 				foreach(inher, cxt->inhRelations)
 				{
-					RangeVar   *inh = castNode(RangeVar, lfirst(inher));
+					RangeVar   *inh = lfirst_node(RangeVar, inher);
 					Relation	rel;
 					int			count;
 
@@ -3421,7 +3444,8 @@ transformAlterTableStmt(Oid relid, AlterTableStmt *stmt,
 								 errmsg("column \"%s\" of relation \"%s\" does not exist",
 										cmd->name, RelationGetRelationName(rel))));
 
-					if (TupleDescAttr(tupdesc, attnum - 1)->attidentity)
+					if (attnum > 0 &&
+						TupleDescAttr(tupdesc, attnum - 1)->attidentity)
 					{
 						Oid			seq_relid = getIdentitySequence(relid, attnum, false);
 						Oid			typeOid = typenameTypeId(pstate, def->typeName);
@@ -3789,14 +3813,18 @@ transformColumnType(CreateStmtContext *cxt, ColumnDef *column)
 
 
 /*
- * transformCreateSchemaStmt -
- *	  analyzes the CREATE SCHEMA statement
+ * transformCreateSchemaStmtElements -
+ *	  analyzes the elements of a CREATE SCHEMA statement
  *
- * Split the schema element list into individual commands and place
- * them in the result list in an order such that there are no forward
- * references (e.g. GRANT to a table created later in the list). Note
- * that the logic we use for determining forward references is
- * presently quite incomplete.
+ * Split the schema element list from a CREATE SCHEMA statement into
+ * individual commands and place them in the result list in an order
+ * such that there are no forward references (e.g. GRANT to a table
+ * created later in the list). Note that the logic we use for determining
+ * forward references is presently quite incomplete.
+ *
+ * "schemaName" is the name of the schema that will be used for the creation
+ * of the objects listed, that may be compiled from the schema name defined
+ * in the statement or a role specification.
  *
  * SQL also allows constraints to make forward references, so thumb through
  * the table columns and move forward references to a posterior alter-table
@@ -3812,15 +3840,13 @@ transformColumnType(CreateStmtContext *cxt, ColumnDef *column)
  * extent.
  */
 List *
-transformCreateSchemaStmt(CreateSchemaStmt *stmt)
+transformCreateSchemaStmtElements(List *schemaElts, const char *schemaName)
 {
 	CreateSchemaStmtContext cxt;
 	List	   *result;
 	ListCell   *elements;
 
-	cxt.stmtType = "CREATE SCHEMA";
-	cxt.schemaname = stmt->schemaname;
-	cxt.authrole = (RoleSpec *) stmt->authrole;
+	cxt.schemaname = schemaName;
 	cxt.sequences = NIL;
 	cxt.tables = NIL;
 	cxt.views = NIL;
@@ -3832,7 +3858,7 @@ transformCreateSchemaStmt(CreateSchemaStmt *stmt)
 	 * Run through each schema element in the schema element list. Separate
 	 * statements by type, and do preliminary analysis.
 	 */
-	foreach(elements, stmt->schemaElts)
+	foreach(elements, schemaElts)
 	{
 		Node	   *element = lfirst(elements);
 
@@ -3917,10 +3943,10 @@ transformCreateSchemaStmt(CreateSchemaStmt *stmt)
  *		Set or check schema name in an element of a CREATE SCHEMA command
  */
 static void
-setSchemaName(char *context_schema, char **stmt_schema_name)
+setSchemaName(const char *context_schema, char **stmt_schema_name)
 {
 	if (*stmt_schema_name == NULL)
-		*stmt_schema_name = context_schema;
+		*stmt_schema_name = unconstify(char *, context_schema);
 	else if (strcmp(context_schema, *stmt_schema_name) != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_SCHEMA_DEFINITION),
@@ -4089,7 +4115,7 @@ transformPartitionBound(ParseState *pstate, Relation parent,
 			duplicate = false;
 			foreach(cell2, result_spec->listdatums)
 			{
-				Const	   *value2 = castNode(Const, lfirst(cell2));
+				Const	   *value2 = lfirst_node(Const, cell2);
 
 				if (equal(value, value2))
 				{
@@ -4268,7 +4294,7 @@ validateInfiniteBounds(ParseState *pstate, List *blist)
 
 	foreach(lc, blist)
 	{
-		PartitionRangeDatum *prd = castNode(PartitionRangeDatum, lfirst(lc));
+		PartitionRangeDatum *prd = lfirst_node(PartitionRangeDatum, lc);
 
 		if (kind == prd->kind)
 			continue;

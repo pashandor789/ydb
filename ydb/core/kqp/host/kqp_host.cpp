@@ -23,6 +23,7 @@
 #include <ydb/library/yql/providers/generic/provider/yql_generic_provider.h>
 #include <ydb/library/yql/providers/pg/provider/yql_pg_provider_impl.h>
 #include <ydb/library/yql/providers/generic/provider/yql_generic_state.h>
+#include <ydb/library/yql/providers/yt/expr_nodes/yql_yt_expr_nodes.h>
 #include <ydb/library/yql/providers/yt/provider/yql_yt_provider.h>
 #include <ydb/library/yql/minikql/invoke_builtins/mkql_builtins.h>
 
@@ -921,6 +922,8 @@ private:
             hasFederatedSorcesOrSinks = hasFederatedSorcesOrSinks
                 || node.Maybe<TS3DataSource>()
                 || node.Maybe<TS3DataSink>()
+                || node.Maybe<TYtDSource>()
+                || node.Maybe<TYtDSink>()
                 || node.Maybe<TGenDataSource>();
 
             return !hasFederatedSorcesOrSinks;
@@ -1058,7 +1061,18 @@ public:
 
         SessionCtx->SetDatabase(database);
         SessionCtx->SetCluster(cluster);
-        SessionCtx->SetTempTables(std::move(tempTablesState));
+        if (tempTablesState) {
+            SessionCtx->SetSessionId(tempTablesState->SessionId);
+            SessionCtx->SetTempTables(std::move(tempTablesState));
+        }
+
+        if (FederatedQuerySetup) {
+            ExternalSourceFactory = NExternalSource::CreateExternalSourceFactory({},
+                                                                                 ActorSystem,
+                                                                                 FederatedQuerySetup->S3GatewayConfig.GetGeneratorPathsLimit(),
+                                                                                 FederatedQuerySetup ? FederatedQuerySetup->CredentialsFactory : nullptr,
+                                                                                 Config->FeatureFlags.GetEnableExternalSourceSchemaInference());
+        }
     }
 
     IAsyncQueryResultPtr ExecuteSchemeQuery(const TKqpQueryRef& query, bool isSql, const TExecSettings& settings) override {
@@ -1807,6 +1821,9 @@ private:
                 || settingName == "Warning"
                 || settingName == "UseBlocks"
                 || settingName == "BlockEngine"
+                || settingName == "FilterPushdownOverJoinOptionalSide"
+                || settingName == "DisableFilterPushdownOverJoinOptionalSide"
+                || settingName == "RotateJoinTree"
                 ;
         };
         auto configProvider = CreateConfigProvider(*TypesCtx, gatewaysConfig, {}, allowSettings);
@@ -1826,6 +1843,7 @@ private:
             .Add(TCollectParametersTransformer::Sync(SessionCtx->QueryPtr()), "CollectParameters")
             .AddPostTypeAnnotation()
             .AddOptimization(true, false)
+            .Add(GetDqIntegrationPeepholeTransformer(true, TypesCtx), "DqIntegrationPeephole")
             .Add(TLogExprTransformer::Sync("Optimized expr"), "LogExpr")
             .AddRun(&NullProgressWriter)
             .Build();
@@ -1907,7 +1925,7 @@ private:
     TIntrusivePtr<TExecuteContext> ExecuteCtx;
     TIntrusivePtr<TKqlTransformContext> TransformCtx;
     TIntrusivePtr<IKqpRunner> KqpRunner;
-    NExternalSource::IExternalSourceFactory::TPtr ExternalSourceFactory{NExternalSource::CreateExternalSourceFactory({})};
+    NExternalSource::IExternalSourceFactory::TPtr ExternalSourceFactory;
 
     TKqpTempTablesState::TConstPtr TempTablesState;
     NActors::TActorSystem* ActorSystem = nullptr;
@@ -1930,7 +1948,7 @@ Ydb::Table::QueryStatsCollection::Mode GetStatsMode(NYql::EKikimrStatsMode stats
 
 TIntrusivePtr<IKqpHost> CreateKqpHost(TIntrusivePtr<IKqpGateway> gateway, const TString& cluster,
     const TString& database, TKikimrConfiguration::TPtr config, IModuleResolver::TPtr moduleResolver,
-    std::optional<TKqpFederatedQuerySetup> federatedQuerySetup, const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, const TGUCSettings::TPtr& gUCSettings, 
+    std::optional<TKqpFederatedQuerySetup> federatedQuerySetup, const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, const TGUCSettings::TPtr& gUCSettings,
     const TMaybe<TString>& applicationName, const NKikimr::NMiniKQL::IFunctionRegistry* funcRegistry, bool keepConfigChanges,
     bool isInternalCall, TKqpTempTablesState::TConstPtr tempTablesState, NActors::TActorSystem* actorSystem, NYql::TExprContext* ctx)
 {

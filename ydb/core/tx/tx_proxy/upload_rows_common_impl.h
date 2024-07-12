@@ -99,8 +99,8 @@ public:
         }
         RowCost += TUpsertCost::OneRowCost(sz);
 
-        TConstArrayRef<TCell> keyCells(&cells[0], KeySize);
-        TConstArrayRef<TCell> valueCells(&cells[KeySize], cells.size() - KeySize);
+        TConstArrayRef<TCell> keyCells = cells.first(KeySize);
+        TConstArrayRef<TCell> valueCells = cells.subspan(KeySize);
 
         TSerializedCellVec serializedKey(keyCells);
         Rows.emplace_back(std::move(serializedKey), TSerializedCellVec::Serialize(valueCells));
@@ -213,7 +213,7 @@ public:
     explicit TUploadRowsBase(TDuration timeout = TDuration::Max(), bool diskQuotaExceeded = false, NWilson::TSpan span = {})
         : TBase()
         , SchemeCache(MakeSchemeCacheID())
-        , LeaderPipeCache(MakePipePeNodeCacheID(false))
+        , LeaderPipeCache(MakePipePerNodeCacheID(false))
         , Timeout((timeout && timeout <= DEFAULT_TIMEOUT) ? timeout : DEFAULT_TIMEOUT)
         , Status(Ydb::StatusIds::SUCCESS)
         , DiskQuotaExceeded(diskQuotaExceeded)
@@ -786,7 +786,7 @@ private:
                     LogPrefix() << "no data or conversion error", ctx);
             }
 
-            auto batch = NArrow::ExtractColumns(Batch, outputColumns);
+            auto batch = NArrow::TColumnOperator().NullIfAbsent().Extract(Batch, outputColumns);
             if (!batch) {
                 for (auto& columnName : outputColumns) {
                     if (Batch->schema()->GetFieldIndex(columnName) < 0) {

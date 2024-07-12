@@ -1,7 +1,6 @@
 #include "s3_recipe_ut_helpers.h"
 
 #include <ydb/core/kqp/ut/common/kqp_ut_common.h>
-#include <ydb/core/kqp/ut/federated_query/common/common.h>
 #include <ydb/core/kqp/federated_query/kqp_federated_query_helpers.h>
 #include <ydb/library/yql/utils/log/log.h>
 #include <ydb/public/sdk/cpp/client/draft/ydb_scripting.h>
@@ -29,7 +28,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, object, TEST_CONTENT);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -91,7 +90,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, object, TEST_CONTENT);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -163,7 +162,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, object, TEST_CONTENT);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -189,7 +188,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
         auto result = session.ExecuteSchemeQuery(query).GetValueSync();
         UNIT_ASSERT_C(result.GetStatus() == NYdb::EStatus::SUCCESS, result.GetIssues().ToString());
 
-        auto settings = TExecuteScriptSettings().StatsMode(Ydb::Query::STATS_MODE_BASIC);
+        auto settings = TExecuteScriptSettings().StatsMode(EStatsMode::Basic);
 
         const TString sql = fmt::format(R"(
                 SELECT * FROM `{external_table}`
@@ -202,12 +201,12 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         NYdb::NQuery::TScriptExecutionOperation readyOp = WaitScriptExecutionOperation(scriptExecutionOperation.Id(), kikimr->GetDriver());
         UNIT_ASSERT_EQUAL(readyOp.Metadata().ExecStatus, EExecStatus::Completed);
-        UNIT_ASSERT_EQUAL(readyOp.Metadata().ExecStats.compilation().from_cache(), false);
+        UNIT_ASSERT_EQUAL(TProtoAccessor().GetProto(readyOp.Metadata().ExecStats).compilation().from_cache(), false);
 
         scriptExecutionOperation = db.ExecuteScript(sql, settings).ExtractValueSync();
         readyOp = WaitScriptExecutionOperation(scriptExecutionOperation.Id(), kikimr->GetDriver());
         UNIT_ASSERT_EQUAL(readyOp.Metadata().ExecStatus, EExecStatus::Completed);
-        UNIT_ASSERT_EQUAL(readyOp.Metadata().ExecStats.compilation().from_cache(), false);
+        UNIT_ASSERT_EQUAL(TProtoAccessor().GetProto(readyOp.Metadata().ExecStats).compilation().from_cache(), false);
     }
 
     Y_UNIT_TEST(ExecuteScriptWithDataSource) {
@@ -216,7 +215,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, "test_object", TEST_CONTENT);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
         const TString query = fmt::format(R"(
@@ -266,7 +265,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, "test_object", TEST_CONTENT);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
         {
@@ -342,7 +341,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, object, TEST_CONTENT);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -403,7 +402,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, "test_object", TEST_CONTENT);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
         {
@@ -480,7 +479,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, "test_object", TEST_CONTENT);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
         const TString query = fmt::format(R"(
@@ -534,7 +533,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
         auto appConfig = std::make_optional<NKikimrConfig::TAppConfig>();
         appConfig->MutableTableServiceConfig()->SetBindingsMode(mode);
 
-        auto kikimr = MakeKikimrRunner(true, nullptr, nullptr, appConfig);
+        auto kikimr = NTestUtils::MakeKikimrRunner(appConfig);
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -645,7 +644,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
             CreateBucket(writeBucket, s3Client);
         }
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -735,7 +734,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
             CreateBucket(writeBucket, s3Client);
         }
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -812,7 +811,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
         const TString readBucket = "test_bucket_read";
         const TString readObject = "test_object_read";
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -868,7 +867,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
             UploadObject(bucket, keysObject, TEST_CONTENT_KEYS, s3Client);
         }
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -936,7 +935,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, object, content);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -993,7 +992,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, object, "");
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -1067,7 +1066,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
         appCfg.MutableQueryServiceConfig()->set_scriptresultrowslimit(ROWS_LIMIT);
         appCfg.MutableTableServiceConfig()->MutableQueryLimits()->set_resultrowslimit(ROWS_LIMIT);
 
-        auto kikimr = MakeKikimrRunner(true, nullptr, nullptr, appCfg);
+        auto kikimr = NTestUtils::MakeKikimrRunner(appCfg);
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -1130,7 +1129,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
             CreateBucket(writeBucket, s3Client);
         }
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -1228,7 +1227,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, object, content);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -1312,7 +1311,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
     }
 
     Y_UNIT_TEST(StreamExecuteScriptWithGenericAutoDetection) {
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
         const TString sql = CreateSimpleGenericQuery(kikimr, "test_bucket_stream_execute_generic_auto_detection");
 
         auto driver = kikimr->GetDriver();
@@ -1325,7 +1324,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
     }
 
     Y_UNIT_TEST(ExecuteScriptWithGenericAutoDetection) {
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
         const TString sql = CreateSimpleGenericQuery(kikimr, "test_bucket_execute_generic_auto_detection");
 
         auto driver = kikimr->GetDriver();
@@ -1343,7 +1342,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
     }
 
     Y_UNIT_TEST(ExplainScriptWithGenericAutoDetection) {
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
         const TString sql = CreateSimpleGenericQuery(kikimr, "test_bucket_explain_generic_auto_detection");
 
         auto driver = kikimr->GetDriver();
@@ -1364,7 +1363,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, object, TEST_CONTENT);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -1452,7 +1451,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
             CreateBucket(writeBucket, s3Client);
         }
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -1535,7 +1534,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
         CreateBucketWithObject(bucket, object, TEST_CONTENT);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
 
         auto tc = kikimr->GetTableClient();
         auto session = tc.CreateSession().GetValueSync().GetSession();
@@ -1579,7 +1578,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
             auto db = kikimr->GetQueryClient();
             auto queryExecutionOperation = db.ExecuteQuery(sql, NYdb::NQuery::TTxControl::BeginTx().CommitTx()).ExtractValueSync();
-            UNIT_ASSERT_VALUES_UNEQUAL_C(queryExecutionOperation.GetStatus(), EStatus::SUCCESS, queryExecutionOperation.GetIssues().ToString());
+            UNIT_ASSERT_EQUAL_C(queryExecutionOperation.GetStatus(), EStatus::BAD_REQUEST, static_cast<int>(queryExecutionOperation.GetStatus()) << ", " << queryExecutionOperation.GetIssues().ToString());
             UNIT_ASSERT_STRING_CONTAINS(queryExecutionOperation.GetIssues().ToString(), "\"/Root/external_table\" is expected to be external data source");
         }
 
@@ -1600,7 +1599,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
 
             auto db = kikimr->GetQueryClient();
             auto queryExecutionOperation = db.ExecuteQuery(sql, NYdb::NQuery::TTxControl::BeginTx().CommitTx()).ExtractValueSync();
-            UNIT_ASSERT_VALUES_UNEQUAL_C(queryExecutionOperation.GetStatus(), EStatus::SUCCESS, queryExecutionOperation.GetIssues().ToString());
+            UNIT_ASSERT_EQUAL_C(queryExecutionOperation.GetStatus(), EStatus::BAD_REQUEST, static_cast<int>(queryExecutionOperation.GetStatus()) << ", " << queryExecutionOperation.GetIssues().ToString());
             UNIT_ASSERT_STRING_CONTAINS(queryExecutionOperation.GetIssues().ToString(), "\"/Root/external_table\" is expected to be external data source");
         }
     }
@@ -1615,7 +1614,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
         //UploadObject(bucket, "l/l", R"json({"l_extendedprice": 0.0, "l_discount": 1.0, "l_partkey": 1})json", s3Client);
         //UploadObject(bucket, "p/p", R"json({"p_partkey": 1, "p_type": "t"})json", s3Client);
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
         auto client = kikimr->GetQueryClient();
 
         {
@@ -1693,7 +1692,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
         // Create external data source
         const TString externalDataSourceName = "/Root/external_data_source";
 
-        auto kikimr = MakeKikimrRunner(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner();
         auto tableClient = kikimr->GetTableClient();
         auto session = tableClient.CreateSession().GetValueSync().GetSession();
         const TString schemeQuery = fmt::format(R"(
@@ -1729,10 +1728,8 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
         UNIT_ASSERT_EQUAL(readyOp.Metadata().ExecStatus, EExecStatus::Completed);
 
         // Validate query results
-        const size_t fetchLimit = std::min(1000ul, 10_MB / rowContent.size());
-
         TFetchScriptResultsSettings settings;
-        settings.RowsLimit(fetchLimit);
+        settings.RowsLimit(0);
         size_t rowsFetched = 0;
         while (true) {
             TFetchScriptResultsResult results = queryClient.FetchScriptResults(scriptExecutionOperation.Id(), 0, settings).ExtractValueSync();
@@ -1751,27 +1748,37 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
             }
 
             settings.FetchToken(results.GetNextFetchToken());
-            UNIT_ASSERT_VALUES_EQUAL(resultSet.RowsCount(), fetchLimit);
         }
         UNIT_ASSERT_VALUES_EQUAL(rowsFetched, numberRows);
 
         // Test forget operation
-        TInstant forgetOperationTimeout = TInstant::Now() + NSan::PlainOrUnderSanitizer(TDuration::Minutes(4), TDuration::Minutes(20));
         NYdb::NOperation::TOperationClient operationClient(kikimr->GetDriver());
-        while (TInstant::Now() < forgetOperationTimeout) {
-            auto status = operationClient.Forget(scriptExecutionOperation.Id()).ExtractValueSync();
-            if (status.GetStatus() == NYdb::EStatus::SUCCESS || status.GetStatus() == NYdb::EStatus::NOT_FOUND) {
+        auto status = operationClient.Forget(scriptExecutionOperation.Id()).ExtractValueSync();
+        UNIT_ASSERT_C(status.IsSuccess(), status.GetIssues().ToOneLineString());
+
+        const TString countResultsQuery = fmt::format(R"(
+                SELECT COUNT(*)
+                FROM `.metadata/result_sets`
+                WHERE execution_id = "{execution_id}" AND expire_at > CurrentUtcTimestamp();
+            )", "execution_id"_a=readyOp.Metadata().ExecutionId);
+
+        TInstant forgetChecksStart = TInstant::Now();
+        while (TInstant::Now() - forgetChecksStart <= TDuration::Minutes(5)) {
+            NYdb::NTable::TDataQueryResult result = session.ExecuteDataQuery(countResultsQuery, NYdb::NTable::TTxControl::BeginTx().CommitTx()).ExtractValueSync();
+            UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+
+            auto resultSet = result.GetResultSetParser(0);
+            resultSet.TryNextRow();
+
+            ui64 numberRows = resultSet.ColumnParser(0).GetUint64();
+            if (!numberRows) {
                 return;
             }
 
-            UNIT_ASSERT_C(status.GetStatus() == NYdb::EStatus::ABORTED || status.GetStatus() == NYdb::EStatus::TIMEOUT || status.GetStatus() == NYdb::EStatus::CLIENT_DEADLINE_EXCEEDED, status.GetIssues().ToString());
-
-            if (status.GetStatus() == NYdb::EStatus::CLIENT_DEADLINE_EXCEEDED) {
-                // Wait until last forget is not finished
-                Sleep(TDuration::Seconds(1));
-            }
+            Cerr << "Rows remains: " << numberRows << ", elapsed time: " << TInstant::Now() - forgetChecksStart << "\n";
+            Sleep(TDuration::Seconds(1));
         }
-        UNIT_ASSERT_C(false, "Forget operation retry limit exceeded");
+        UNIT_ASSERT_C(false, "Results removing timeout");
     }
 
     Y_UNIT_TEST(ExecuteScriptWithLargeStrings) {
@@ -1779,7 +1786,180 @@ Y_UNIT_TEST_SUITE(KqpFederatedQuery) {
     }
 
     Y_UNIT_TEST(ExecuteScriptWithLargeFile) {
+        ExecuteSelectQuery("test_bucket_execute_script_with_large_file", 65_MB, 500000);
+    }
+
+    Y_UNIT_TEST(ExecuteScriptWithThinFile) {
         ExecuteSelectQuery("test_bucket_execute_script_with_large_file", 5_MB, 500000);
+    }
+
+    std::shared_ptr<TKikimrRunner> CreateSampleDataSource(const TString& externalDataSourceName, const TString& externalTableName) {
+        const TString bucket = "test_bucket3";
+        const TString object = "test_object";
+
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableOlapSink(true);
+        appConfig.MutableTableServiceConfig()->SetEnableOltpSink(true);
+        appConfig.MutableTableServiceConfig()->SetEnableCreateTableAs(true);
+        appConfig.MutableTableServiceConfig()->SetEnablePerStatementQueryExecution(true);
+        appConfig.MutableFeatureFlags()->SetEnableTempTables(true);
+        auto kikimr = NTestUtils::MakeKikimrRunner(appConfig, "TestDomain");
+
+        CreateBucketWithObject(bucket, "test_object", TEST_CONTENT);
+
+        auto tc = kikimr->GetTableClient();
+        auto session = tc.CreateSession().GetValueSync().GetSession();
+        const TString query = fmt::format(R"(
+            CREATE EXTERNAL DATA SOURCE `{external_source}` WITH (
+                SOURCE_TYPE="ObjectStorage",
+                LOCATION="{location}",
+                AUTH_METHOD="NONE"
+            );
+            CREATE EXTERNAL TABLE `{external_table}` (
+                key Utf8 NOT NULL,
+                value Utf8 NOT NULL
+            ) WITH (
+                DATA_SOURCE="{external_source}",
+                LOCATION="{object}",
+                FORMAT="json_each_row"
+            );)",
+            "external_source"_a = externalDataSourceName,
+            "external_table"_a = externalTableName,
+            "location"_a = GetBucketLocation(bucket),
+            "object"_a = object
+        );
+        auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+        UNIT_ASSERT_C(result.GetStatus() == NYdb::EStatus::SUCCESS, result.GetIssues().ToString());
+
+        return kikimr;
+    }
+
+    void ValidateResult(const TExecuteQueryResult& result) {
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetResultSets().size(), 1, "Unexpected result sets count");
+
+        TResultSetParser resultSet(result.GetResultSet(0));
+        UNIT_ASSERT_VALUES_EQUAL(resultSet.ColumnsCount(), 2);
+        UNIT_ASSERT_VALUES_EQUAL(resultSet.RowsCount(), 2);
+
+        UNIT_ASSERT(resultSet.TryNextRow());
+        UNIT_ASSERT_VALUES_EQUAL(resultSet.ColumnParser(0).GetUtf8(), "1");
+        UNIT_ASSERT_VALUES_EQUAL(resultSet.ColumnParser(1).GetUtf8(), "trololo");
+
+        UNIT_ASSERT(resultSet.TryNextRow());
+        UNIT_ASSERT_VALUES_EQUAL(resultSet.ColumnParser(0).GetUtf8(), "2");
+        UNIT_ASSERT_VALUES_EQUAL(resultSet.ColumnParser(1).GetUtf8(), "hello world");
+
+    }
+
+    void ValidateTables(TQueryClient& client, const TString& oltpTable, const TString& olapTable) {
+        {
+            const TString query = TStringBuilder() << "SELECT Unwrap(key), Unwrap(value) FROM `" << oltpTable << "`;";
+            ValidateResult(client.ExecuteQuery(query, NYdb::NQuery::TTxControl::BeginTx().CommitTx()).ExtractValueSync());
+        }
+
+        {
+            const TString query = TStringBuilder() << "SELECT key, value FROM `" << olapTable << "` ORDER BY key;";
+            ValidateResult(client.ExecuteQuery(query, NYdb::NQuery::TTxControl::BeginTx().CommitTx()).ExtractValueSync());
+        }
+    }
+
+    Y_UNIT_TEST(CreateTableAsSelectFromExternalDataSource) {
+        const TString externalDataSourceName = "external_data_source";
+        const TString externalTableName = "test_binding_resolve";
+
+        auto kikimr = CreateSampleDataSource(externalDataSourceName, externalTableName);
+        auto client = kikimr->GetQueryClient();
+
+        const TString oltpTable = "DestinationOltp";
+        {
+            const TString query = fmt::format(R"(
+                PRAGMA TablePathPrefix = "TestDomain";
+                CREATE TABLE `{destination}` (
+                    PRIMARY KEY (key, value)
+                )
+                AS SELECT *
+                FROM `{external_source}`.`/` WITH (
+                    format="json_each_row",
+                    schema(
+                        key Utf8 NOT NULL,
+                        value Utf8 NOT NULL
+                    )
+                );)",
+                "destination"_a = oltpTable,
+                "external_source"_a = externalDataSourceName
+            );
+            auto result = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        const TString olapTable = "DestinationOlap";
+        {
+            const TString query = fmt::format(R"(
+                PRAGMA TablePathPrefix = "TestDomain";
+                CREATE TABLE `{destination}` (
+                    PRIMARY KEY (key, value)
+                )
+                WITH (STORE = COLUMN)
+                AS SELECT *
+                FROM `{external_source}`.`/` WITH (
+                    format="json_each_row",
+                    schema(
+                        key Utf8 NOT NULL,
+                        value Utf8 NOT NULL
+                    )
+                );)",
+                "destination"_a = olapTable,
+                "external_source"_a = externalDataSourceName
+            );
+            auto result = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        ValidateTables(client, oltpTable, olapTable);
+    }
+
+    Y_UNIT_TEST(CreateTableAsSelectFromExternalTable) {
+        const TString externalDataSourceName = "external_data_source";
+        const TString externalTableName = "test_binding_resolve";
+
+        auto kikimr = CreateSampleDataSource(externalDataSourceName, externalTableName);
+        auto client = kikimr->GetQueryClient();
+
+        const TString oltpTable = "DestinationOltp";
+        {
+            const TString query = fmt::format(R"(
+                PRAGMA TablePathPrefix = "TestDomain";
+                CREATE TABLE `{destination}` (
+                    PRIMARY KEY (key, value)
+                )
+                AS SELECT *
+                FROM `{external_table}`;)",
+                "destination"_a = oltpTable,
+                "external_table"_a = externalTableName
+            );
+            auto result = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        const TString olapTable = "DestinationOlap";
+        {
+            const TString query = fmt::format(R"(
+                PRAGMA TablePathPrefix = "TestDomain";
+                CREATE TABLE `{destination}` (
+                    PRIMARY KEY (key, value)
+                )
+                WITH (STORE = COLUMN)
+                AS SELECT *
+                FROM `{external_table}`;)",
+                "destination"_a = olapTable,
+                "external_table"_a = externalTableName
+            );
+            auto result = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        ValidateTables(client, oltpTable, olapTable);
     }
 }
 

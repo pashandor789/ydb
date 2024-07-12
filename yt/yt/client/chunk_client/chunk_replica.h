@@ -54,7 +54,6 @@ void ToProto(ui32* value, TChunkReplicaWithMedium replica) = delete;
 void FromProto(TChunkReplicaWithMedium* replica, ui32 value) = delete;
 
 void FormatValue(TStringBuilderBase* builder, TChunkReplicaWithMedium replica, TStringBuf spec);
-TString ToString(TChunkReplicaWithMedium replica);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -86,7 +85,6 @@ private:
 };
 
 void FormatValue(TStringBuilderBase* builder, TChunkReplicaWithLocation replica, TStringBuf spec);
-TString ToString(TChunkReplicaWithLocation replica);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -115,7 +113,6 @@ private:
 };
 
 void FormatValue(TStringBuilderBase* builder, TChunkReplica replica, TStringBuf spec);
-TString ToString(TChunkReplica replica);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -154,13 +151,13 @@ struct TChunkIdWithIndexes
 
 bool operator<(const TChunkIdWithIndex& lhs, const TChunkIdWithIndex& rhs);
 
-TString ToString(const TChunkIdWithIndex& id);
+void FormatValue(TStringBuilderBase* builder, const TChunkIdWithIndex& id, TStringBuf spec = {});
 
 ////////////////////////////////////////////////////////////////////////////////
 
 bool operator<(const TChunkIdWithIndexes& lhs, const TChunkIdWithIndexes& rhs);
 
-TString ToString(const TChunkIdWithIndexes& id);
+void FormatValue(TStringBuilderBase* builder, const TChunkIdWithIndexes& id, TStringBuf spec = {});
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -169,6 +166,9 @@ bool IsArtifactChunkId(TChunkId id);
 
 //! Returns |true| iff this is a chunk or any type (journal or blob, replicated or erasure-coded).
 bool IsPhysicalChunkType(NObjectClient::EObjectType type);
+
+//! Returns |true| iff this is a chunk or any type (journal or blob, replicated or erasure-coded).
+bool IsPhysicalChunkId(TChunkId id);
 
 //! Returns |true| iff this is a journal chunk type.
 bool IsJournalChunkType(NObjectClient::EObjectType type);

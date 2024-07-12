@@ -64,10 +64,11 @@ TKikimrConfiguration::TKikimrConfiguration() {
     REGISTER_SETTING(*this, OptEnablePredicateExtract);
     REGISTER_SETTING(*this, OptEnableOlapPushdown);
     REGISTER_SETTING(*this, OptEnableOlapProvideComputeSharding);
+    REGISTER_SETTING(*this, OverrideStatistics);
+
 
     REGISTER_SETTING(*this, OptUseFinalizeByKey);
     REGISTER_SETTING(*this, CostBasedOptimizationLevel);
-    REGISTER_SETTING(*this, OptEnableConstantFolding);
 
     REGISTER_SETTING(*this, MaxDPccpDPTableSize);
 
@@ -77,6 +78,7 @@ TKikimrConfiguration::TKikimrConfiguration() {
     REGISTER_SETTING(*this, ScanQuery);
 
     IndexAutoChooserMode = NKikimrConfig::TTableServiceConfig_EIndexAutoChooseMode_DISABLED;
+    BlockChannelsMode = NKikimrConfig::TTableServiceConfig_EBlockChannelsMode_BLOCK_CHANNELS_SCALAR;
 }
 
 bool TKikimrSettings::HasAllowKqpUnsafeCommit() const {
@@ -121,10 +123,6 @@ bool TKikimrSettings::HasOptEnableOlapProvideComputeSharding() const {
 
 bool TKikimrSettings::HasOptUseFinalizeByKey() const {
     return GetOptionalFlagValue(OptUseFinalizeByKey.Get()) != EOptionalFlag::Disabled;
-}
-
-bool TKikimrSettings::HasOptEnableConstantFolding() const {
-    return GetOptionalFlagValue(OptEnableConstantFolding.Get()) == EOptionalFlag::Enabled;
 }
 
 

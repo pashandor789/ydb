@@ -1,7 +1,8 @@
 #include "fiber_scheduler_thread.h"
 
-#include "private.h"
 #include "fiber.h"
+#include "moody_camel_concurrent_queue.h"
+#include "private.h"
 
 #include <yt/yt/library/profiling/producer.h>
 
@@ -25,11 +26,17 @@
 
 #include <thread>
 
-namespace NYT::NConcurrency {
+#if defined(_linux_) && !defined(NDEBUG)
+    #define YT_ENABLE_TLS_ADDRESS_TRACKING
+#endif
 
-// NB(arkady-e1ppa): Please run core tests with this macro undefined
-// if you are changing fibers.
-#define YT_REUSE_FIBERS
+#ifdef YT_ENABLE_TLS_ADDRESS_TRACKING
+    #include <unistd.h>
+    #include <sys/types.h>
+    #include <sys/syscall.h>
+#endif
+
+namespace NYT::NConcurrency {
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -38,7 +45,7 @@ using namespace NProfiling;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static const auto& Logger = ConcurrencyLogger;
+static constexpr auto& Logger = ConcurrencyLogger;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -130,18 +137,18 @@ struct TFiberContext
     TFiber* CurrentFiber = nullptr;
 };
 
-YT_THREAD_LOCAL(TFiberContext*) FiberContext;
+YT_DEFINE_THREAD_LOCAL(TFiberContext*, FiberContext, nullptr);
 
 // Forbid inlining these accessors to prevent the compiler from
 // miss-optimizing TLS access in presence of fiber context switches.
-Y_NO_INLINE TFiberContext* TryGetFiberContext()
+TFiberContext* TryGetFiberContext()
 {
-    return FiberContext;
+    return FiberContext();
 }
 
-Y_NO_INLINE void SetFiberContext(TFiberContext* context)
+void SetFiberContext(TFiberContext* context)
 {
-    FiberContext = context;
+    FiberContext() = context;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -150,17 +157,21 @@ class TFiberContextGuard
 {
 public:
     explicit TFiberContextGuard(TFiberContext* context)
+        : Prev_(TryGetFiberContext())
     {
         SetFiberContext(context);
     }
 
     ~TFiberContextGuard()
     {
-        SetFiberContext(nullptr);
+        SetFiberContext(Prev_);
     }
 
     TFiberContextGuard(const TFiberContextGuard&) = delete;
     TFiberContextGuard operator=(const TFiberContextGuard&) = delete;
+
+private:
+    TFiberContext* Prev_;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -188,7 +199,7 @@ Y_FORCE_INLINE ELogLevel SwapMinLogLevel(ELogLevel minLogLevel)
 
 Y_FORCE_INLINE TExceptionSafeContext* GetMachineContext()
 {
-    return &TryGetFiberContext()->MachineContext;
+    return &FiberContext()->MachineContext;
 }
 
 Y_FORCE_INLINE void SetAfterSwitch(TAfterSwitch afterSwitch)
@@ -200,53 +211,53 @@ Y_FORCE_INLINE void SetAfterSwitch(TAfterSwitch afterSwitch)
 
 Y_FORCE_INLINE TAfterSwitch ExtractAfterSwitch()
 {
-    auto* context = TryGetFiberContext();
+    auto* context = FiberContext();
     return context->AfterSwitch.Release();
 }
 
 Y_FORCE_INLINE void SetResumerFiber(TFiber* fiber)
 {
-    auto* context = TryGetFiberContext();
+    auto* context = FiberContext();
     YT_VERIFY(!context->ResumerFiber);
     context->ResumerFiber = fiber;
 }
 
 Y_FORCE_INLINE TFiber* ExtractResumerFiber()
 {
-    return std::exchange(TryGetFiberContext()->ResumerFiber, nullptr);
+    return std::exchange(FiberContext()->ResumerFiber, nullptr);
 }
 
 Y_FORCE_INLINE TFiber* TryGetResumerFiber()
 {
-    return TryGetFiberContext()->ResumerFiber;
+    return FiberContext()->ResumerFiber;
 }
 
 Y_FORCE_INLINE TFiber* SwapCurrentFiber(TFiber* fiber)
 {
-    return std::exchange(TryGetFiberContext()->CurrentFiber, fiber);
+    return std::exchange(FiberContext()->CurrentFiber, fiber);
 }
 
 Y_FORCE_INLINE TFiber* TryGetCurrentFiber()
 {
-    auto* context = TryGetFiberContext();
+    auto* context = FiberContext();
     return context ? context->CurrentFiber : nullptr;
 }
 
 Y_FORCE_INLINE TFiber* GetCurrentFiber()
 {
-    auto* fiber = TryGetFiberContext()->CurrentFiber;
+    auto* fiber = FiberContext()->CurrentFiber;
     YT_VERIFY(fiber);
     return fiber;
 }
 
 Y_FORCE_INLINE TFiberSchedulerThread* TryGetFiberThread()
 {
-    return TryGetFiberContext()->FiberThread;
+    return FiberContext()->FiberThread;
 }
 
 Y_FORCE_INLINE TRefCountedGaugePtr GetWaitingFibersCounter()
 {
-    return TryGetFiberContext()->WaitingFibersCounter;
+    return FiberContext()->WaitingFibersCounter;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -302,7 +313,6 @@ void SwitchFromFiber(TFiber* targetFiber, TAfterSwitch afterSwitch)
     auto* targetContext = targetFiber->GetMachineContext();
 
     auto currentFiber = SwapCurrentFiber(targetFiber);
-    YT_VERIFY(currentFiber->GetState() != EFiberState::Waiting);
     auto* currentContext = currentFiber->GetMachineContext();
 
     SetAfterSwitch(afterSwitch);
@@ -313,7 +323,40 @@ void SwitchFromFiber(TFiber* targetFiber, TAfterSwitch afterSwitch)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-#ifdef YT_REUSE_FIBERS
+class TFiberIdGenerator
+{
+public:
+    static TFiberIdGenerator* Get()
+    {
+        return LeakySingleton<TFiberIdGenerator>();
+    }
+
+    TFiberId Generate()
+    {
+        const TFiberId Factor = std::numeric_limits<TFiberId>::max() - 173864;
+        YT_ASSERT(Factor % 2 == 1); // Factor must be coprime with 2^n.
+
+        while (true) {
+            auto seed = Seed_++;
+            auto id = seed * Factor;
+            if (id != InvalidFiberId) {
+                return id;
+            }
+        }
+    }
+
+private:
+    std::atomic<TFiberId> Seed_;
+
+    DECLARE_LEAKY_SINGLETON_FRIEND()
+
+    TFiberIdGenerator()
+    {
+        Seed_.store(static_cast<TFiberId>(::time(nullptr)));
+    }
+};
+
+////////////////////////////////////////////////////////////////////////////////
 
 class TIdleFiberPool
 {
@@ -327,6 +370,8 @@ public:
     // Save fiber in AfterSwitch because it can be immediately concurrently reused.
     void SwichFromFiberAndMakeItIdle(TFiber* currentFiber, TFiber* targetFiber)
     {
+        RemoveOverdrawnIdleFibers();
+
         auto afterSwitch = MakeAfterSwitch([currentFiber, this] {
             currentFiber->SetIdle();
             EnqueueIdleFiber(currentFiber);
@@ -344,50 +389,24 @@ public:
         return TFiber::CreateFiber();
     }
 
+    void UpdateMaxIdleFibers(int maxIdleFibers)
+    {
+        MaxIdleFibers_.store(maxIdleFibers, std::memory_order::relaxed);
+    }
+
 private:
+    moodycamel::ConcurrentQueue<TFiber*> IdleFibers_;
+    std::atomic<int> MaxIdleFibers_ = DefaultMaxIdleFibers;
+
+    // NB(arkady-e1ppa): Construct this last so that every other
+    // field is initialized if this callback is ran concurrently.
     const TShutdownCookie ShutdownCookie_ = RegisterShutdownCallback(
-        "FiberManager",
-        BIND_NO_PROPAGATE(&TIdleFiberPool::DestroyIdleFibers, this),
-        /*priority*/ -100);
+        "IdleFiberPool",
+        BIND_NO_PROPAGATE(&TIdleFiberPool::Shutdown, this),
+        /*priority*/ std::numeric_limits<int>::min() + 1);
 
-    TLockFreeStack<TFiber*> IdleFibers_;
-    std::atomic<bool> DestroyingIdleFibers_ = false;
-
-    void EnqueueIdleFiber(TFiber* fiber)
+    void Shutdown()
     {
-        IdleFibers_.Enqueue(fiber);
-        if (DestroyingIdleFibers_.load()) {
-            DoDestroyIdleFibers();
-        }
-    }
-
-    TFiber* TryDequeueIdleFiber()
-    {
-        TFiber* fiber = nullptr;
-        IdleFibers_.Dequeue(&fiber);
-        return fiber;
-    }
-
-    void DestroyIdleFibers()
-    {
-        DestroyingIdleFibers_.store(true);
-        DoDestroyIdleFibers();
-    }
-
-    void DoDestroyIdleFibers()
-    {
-        auto destroyFibers = [&] {
-            TFiberContext fiberContext;
-            TFiberContextGuard fiberContextGuard(&fiberContext);
-
-            std::vector<TFiber*> fibers;
-            IdleFibers_.DequeueAll(&fibers);
-
-            for (auto fiber : fibers) {
-                SwitchFromThread(fiber);
-            }
-        };
-
     #ifdef _unix_
         // The current thread could be already exiting and MacOS has some issues
         // with registering new thread-local terminators in this case:
@@ -397,21 +416,83 @@ private:
         std::thread thread([&] {
             ::TThread::SetCurrentThreadName("IdleFiberDtor");
 
-            destroyFibers();
+            JoinAllFibers();
         });
         thread.join();
     #else
         // Starting threads in exit handlers on Windows causes immediate calling exit
         // so the routine will not be executed. Moreover, if we try to join this thread we'll get deadlock
         // because this thread will try to acquire atexit lock which is owned by this thread.
-        destroyFibers();
+        JoinAllFibers();
     #endif
+    }
+
+    void JoinAllFibers()
+    {
+        std::vector<TFiber*> fibers;
+
+        while (true) {
+            auto size = std::max<size_t>(1, IdleFibers_.size_approx());
+
+            DequeueFibersBulk(&fibers, size);
+            if (fibers.empty()) {
+                break;
+            }
+            JoinFibers(std::move(fibers));
+        }
+    }
+
+    void JoinFibers(std::vector<TFiber*>&& fibers)
+    {
+        TFiberContext fiberContext;
+        TFiberContextGuard fiberContextGuard(&fiberContext);
+
+        for (auto fiber : fibers) {
+            // Fibers will observe nullptr fiberThread
+            // and switch back with deleter in afterSwitch.
+            SwitchFromThread(fiber);
+        }
+    }
+
+    void RemoveOverdrawnIdleFibers()
+    {
+        // NB: size_t to int conversion.
+        int size = IdleFibers_.size_approx();
+        if (size <= MaxIdleFibers_.load(std::memory_order::relaxed)) {
+            return;
+        }
+
+        auto targetSize = std::max<size_t>(1, MaxIdleFibers_ / 2);
+
+        std::vector<TFiber*> fibers;
+        DequeueFibersBulk(&fibers, size - targetSize);
+        if (fibers.empty()) {
+            return;
+        }
+        JoinFibers(std::move(fibers));
+    }
+
+    void DequeueFibersBulk(std::vector<TFiber*>* fibers, int count)
+    {
+        fibers->resize(count);
+        auto dequeued = IdleFibers_.try_dequeue_bulk(std::begin(*fibers), count);
+        fibers->resize(dequeued);
+    }
+
+    void EnqueueIdleFiber(TFiber* fiber)
+    {
+        IdleFibers_.enqueue(fiber);
+    }
+
+    TFiber* TryDequeueIdleFiber()
+    {
+        TFiber* fiber = nullptr;
+        IdleFibers_.try_dequeue(fiber);
+        return fiber;
     }
 
     DECLARE_LEAKY_SINGLETON_FRIEND()
 };
-
-#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -420,8 +501,9 @@ Y_FORCE_INLINE TClosure PickCallback(TFiberSchedulerThread* fiberThread)
     TCallback<void()> callback;
     // We wrap fiberThread->OnExecute() into a propagating storage guard to ensure
     // that the propagating storage created there won't spill into the fiber callbacks.
+
     TNullPropagatingStorageGuard guard;
-    YT_VERIFY(guard.GetOldStorage().IsNull());
+    YT_VERIFY(guard.GetOldStorage().IsEmpty());
     callback = fiberThread->OnExecute();
 
     return callback;
@@ -441,6 +523,9 @@ void FiberTrampoline()
     // Break loop to terminate fiber
     while (auto* fiberThread = TryGetFiberThread()) {
         YT_VERIFY(!TryGetResumerFiber());
+        YT_VERIFY(CurrentFls() == nullptr);
+
+        YT_VERIFY(GetCurrentPropagatingStorage().IsEmpty());
 
         auto callback = PickCallback(fiberThread);
 
@@ -458,26 +543,14 @@ void FiberTrampoline()
         // not necessarily null. Check them after switch from and returning into current fiber.
         if (successorFiber = ExtractResumerFiber()) {
             // Suspend current fiber.
-#ifdef YT_REUSE_FIBERS
             TIdleFiberPool::Get()->SwichFromFiberAndMakeItIdle(currentFiber, successorFiber);
-#else
-            break;
-#endif
         }
     }
 
     YT_LOG_DEBUG("Fiber finished");
 
-    auto afterSwitch = MakeAfterSwitch([currentFiber, successorFiber] () mutable {
+    auto afterSwitch = MakeAfterSwitch([currentFiber] () mutable {
         TFiber::ReleaseFiber(currentFiber);
-
-#ifdef YT_REUSE_FIBERS
-        Y_UNUSED(successorFiber);
-#else
-        if (successorFiber != nullptr) {
-            SwitchFromThread(successorFiber);
-        }
-#endif
     });
 
     // All allocated objects in this frame must be destroyed here.
@@ -492,14 +565,8 @@ void YieldFiber(TAfterSwitch afterSwitch)
     auto targetFiber = ExtractResumerFiber();
 
     // If there is no resumer switch to idle fiber. Or switch to thread main.
-#ifdef YT_REUSE_FIBERS
     if (!targetFiber) {
         targetFiber = TIdleFiberPool::Get()->GetFiber();
-    }
-#endif
-
-    if (!targetFiber) {
-        targetFiber = TFiber::CreateFiber();
     }
 
     auto waitingFibersCounter = GetWaitingFibersCounter();
@@ -524,9 +591,6 @@ void ResumeFiber(TFiber* targetFiber)
 
     YT_VERIFY(!TryGetResumerFiber());
 }
-
-class TFiberSwitchHandler;
-TFiberSwitchHandler* TryGetFiberSwitchHandler();
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -679,6 +743,63 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 
+//! This class wraps reads of TLS saving the reader thread id.
+//! Rereads of the TLS compare the thread id and crash if
+//! TLS was cached when it shouldn't have been.
+template <class T>
+class TTlsAddressStorage
+{
+public:
+    TTlsAddressStorage() = default;
+
+    template <CInvocable<T*()> TTlsReader>
+    Y_FORCE_INLINE explicit TTlsAddressStorage(TTlsReader reader)
+    {
+#ifdef YT_ENABLE_TLS_ADDRESS_TRACKING
+        Tid_ = GetTid();
+#endif
+
+        Address_ = reader();
+    }
+
+    Y_FORCE_INLINE T& operator*()
+    {
+        return *Address_;
+    }
+
+    template <CInvocable<T*()> TTlsReader>
+    Y_FORCE_INLINE void ReReadAddress(TTlsReader reader)
+    {
+        auto* address = reader();
+
+#ifdef YT_ENABLE_TLS_ADDRESS_TRACKING
+        auto newTid = GetTid();
+        if (newTid != Tid_) {
+            YT_VERIFY(address != Address_);
+        }
+        Tid_ = newTid;
+#endif
+
+        Address_ = address;
+    }
+
+private:
+#ifdef YT_ENABLE_TLS_ADDRESS_TRACKING
+    pid_t Tid_;
+#endif
+
+    T* Address_;
+
+#ifdef YT_ENABLE_TLS_ADDRESS_TRACKING
+    Y_FORCE_INLINE static pid_t GetTid()
+    {
+        return ::syscall(__NR_gettid);
+    }
+#endif
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
 //! All context thread local variables which must be preserved for each fiber are listed here.
 class TBaseSwitchHandler
 {
@@ -706,6 +827,10 @@ private:
     ELogLevel MinLogLevel_ = ELogLevel::Minimum;
 };
 
+class TFiberSwitchHandler;
+
+YT_DEFINE_THREAD_LOCAL(TFiberSwitchHandler*, CurrentFiberSwitchHandler);
+
 class TFiberSwitchHandler
     : public TBaseSwitchHandler
 {
@@ -713,21 +838,34 @@ public:
     // On start fiber running.
     explicit TFiberSwitchHandler(TFiber* fiber)
         : Fiber_(fiber)
+        , FiberId_(TFiberIdGenerator::Get()->Generate())
     {
-        SavedThis_ = std::exchange(This_, this);
+        AddressStorage_ = TTlsAddressStorage<TFiberSwitchHandler*>([] {
+            return std::addressof(CurrentFiberSwitchHandler());
+        });
 
-        YT_VERIFY(SwapCurrentFiberId(fiber->GetFiberId()) == InvalidFiberId);
-        YT_VERIFY(!SwapCurrentFls(fiber->GetFls()));
+        SavedThis_ = std::exchange(*AddressStorage_, this);
+
+        Fiber_->OnCallbackExecutionStarted(FiberId_, &Fls_);
+
+        YT_VERIFY(SwapCurrentFiberId(FiberId_) == InvalidFiberId);
+        YT_VERIFY(!SwapCurrentFls(&Fls_));
     }
 
     // On finish fiber running.
     ~TFiberSwitchHandler()
     {
-        YT_VERIFY(This_ == this);
+        AddressStorage_.ReReadAddress([] {
+            return std::addressof(CurrentFiberSwitchHandler());
+        });
+
+        YT_VERIFY(*AddressStorage_ == this);
         YT_VERIFY(UserHandlers_.empty());
 
-        YT_VERIFY(SwapCurrentFiberId(InvalidFiberId) == Fiber_->GetFiberId());
-        YT_VERIFY(SwapCurrentFls(nullptr) == Fiber_->GetFls());
+        Fiber_->OnCallbackExecutionFinished();
+
+        YT_VERIFY(SwapCurrentFiberId(InvalidFiberId) == FiberId_);
+        YT_VERIFY(SwapCurrentFls(nullptr) == &Fls_);
 
         // Support case when current fiber has been resumed, but finished without WaitFor.
         // There is preserved context of resumer fiber saved in switchHandler. Restore it.
@@ -750,7 +888,7 @@ public:
         TGuard(TGuard&&) = delete;
 
         TGuard()
-            : SwitchHandler_(This_)
+            : SwitchHandler_(CurrentFiberSwitchHandler())
         {
             YT_VERIFY(SwitchHandler_);
             SwitchHandler_->OnOut();
@@ -767,12 +905,13 @@ public:
 
 private:
     friend TContextSwitchGuard;
-    friend TFiberSwitchHandler* TryGetFiberSwitchHandler();
 
-    const TFiber* const Fiber_;
+    TFiber* const Fiber_;
+    const TFiberId FiberId_;
+    TFls Fls_;
+    TTlsAddressStorage<TFiberSwitchHandler*> AddressStorage_;
 
     TFiberSwitchHandler* SavedThis_;
-    static YT_THREAD_LOCAL(TFiberSwitchHandler*) This_;
 
     struct TContextSwitchHandlers
     {
@@ -792,7 +931,7 @@ private:
 
         TBaseSwitchHandler::OnSwitch();
 
-        std::swap(SavedThis_, GetTlsRef(This_));
+        std::swap(SavedThis_, *AddressStorage_);
     }
 
     // On finish fiber running.
@@ -812,6 +951,9 @@ private:
     // On start fiber running.
     void OnIn()
     {
+        AddressStorage_.ReReadAddress([] {
+            return std::addressof(CurrentFiberSwitchHandler());
+        });
         OnSwitch();
 
         for (auto it = UserHandlers_.rbegin(); it != UserHandlers_.rend(); ++it) {
@@ -824,16 +966,9 @@ private:
     }
 };
 
-YT_THREAD_LOCAL(TFiberSwitchHandler*) TFiberSwitchHandler::This_;
-
-TFiberSwitchHandler* TryGetFiberSwitchHandler()
-{
-    return TFiberSwitchHandler::This_;
-}
-
 TFiberSwitchHandler* GetFiberSwitchHandler()
 {
-    auto* switchHandler = TryGetFiberSwitchHandler();
+    auto* switchHandler = CurrentFiberSwitchHandler();
     YT_VERIFY(switchHandler);
     return switchHandler;
 }
@@ -842,10 +977,11 @@ TFiberSwitchHandler* GetFiberSwitchHandler()
 // See devtools/gdb/yt_fibers_printer.py.
 Y_NO_INLINE void RunInFiberContext(TFiber* fiber, TClosure callback)
 {
-    fiber->Recreate();
     TFiberSwitchHandler switchHandler(fiber);
     TNullPropagatingStorageGuard nullPropagatingStorageGuard;
     callback();
+    // To ensure callback is destroyed before switchHandler.
+    callback.Reset();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -919,6 +1055,8 @@ void TFiberSchedulerThread::ThreadMain()
     // Hold this strongly.
     auto this_ = MakeStrong(this);
 
+    EnsureSafeShutdown();
+
     try {
         YT_LOG_DEBUG("Thread started (Name: %v)",
             GetThreadName());
@@ -938,34 +1076,41 @@ void TFiberSchedulerThread::ThreadMain()
 
 ////////////////////////////////////////////////////////////////////////////////
 
-YT_THREAD_LOCAL(TFiberId) CurrentFiberId;
-
-TFiberId GetCurrentFiberId()
+void UpdateMaxIdleFibers(int maxIdleFibers)
 {
-    return CurrentFiberId;
-}
-
-void SetCurrentFiberId(TFiberId id)
-{
-    CurrentFiberId = id;
+    NDetail::TIdleFiberPool::Get()->UpdateMaxIdleFibers(maxIdleFibers);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-YT_THREAD_LOCAL(bool) ContextSwitchForbidden;
+YT_DEFINE_THREAD_LOCAL(TFiberId, CurrentFiberId);
+
+TFiberId GetCurrentFiberId()
+{
+    return CurrentFiberId();
+}
+
+void SetCurrentFiberId(TFiberId id)
+{
+    CurrentFiberId() = id;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+YT_DEFINE_THREAD_LOCAL(bool, ContextSwitchForbidden);
 
 bool IsContextSwitchForbidden()
 {
-    return ContextSwitchForbidden;
+    return ContextSwitchForbidden();
 }
 
 TForbidContextSwitchGuard::TForbidContextSwitchGuard()
-    : OldValue_(std::exchange(ContextSwitchForbidden, true))
+    : OldValue_(std::exchange(ContextSwitchForbidden(), true))
 { }
 
 TForbidContextSwitchGuard::~TForbidContextSwitchGuard()
 {
-    ContextSwitchForbidden = OldValue_;
+    ContextSwitchForbidden() = OldValue_;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -978,7 +1123,7 @@ bool CheckFreeStackSpace(size_t space)
 
 TFiberCanceler GetCurrentFiberCanceler()
 {
-    auto* switchHandler = NDetail::TryGetFiberSwitchHandler();
+    auto* switchHandler = NDetail::CurrentFiberSwitchHandler();
     if (!switchHandler) {
         // Not in fiber context.
         return {};
@@ -1077,14 +1222,14 @@ TContextSwitchGuard::TContextSwitchGuard(
     TContextSwitchHandler outHandler,
     TContextSwitchHandler inHandler)
 {
-    if (auto* context = NDetail::TryGetFiberSwitchHandler()) {
+    if (auto* context = NDetail::CurrentFiberSwitchHandler()) {
         context->UserHandlers_.push_back({std::move(outHandler), std::move(inHandler)});
     }
 }
 
 TContextSwitchGuard::~TContextSwitchGuard()
 {
-    if (auto* context = NDetail::TryGetFiberSwitchHandler()) {
+    if (auto* context = NDetail::CurrentFiberSwitchHandler()) {
         YT_VERIFY(!context->UserHandlers_.empty());
         context->UserHandlers_.pop_back();
     }

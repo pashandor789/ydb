@@ -59,8 +59,8 @@ join
 on
     c.c_custkey = o.o_custkey
 where
-    CAST(o.o_orderdate AS Timestamp) >= $border
-    and CAST(o.o_orderdate AS Timestamp) < ($border + Interval("P365D"))
+    o.o_orderdate >= $border
+    and o.o_orderdate < ($border + Interval("P365D"))
 );
 
 $j5 = (
@@ -79,7 +79,7 @@ on
 
 select
     n_name,
-    sum(l_extendedprice * (1 - l_discount)) as revenue
+    sum(l_extendedprice * ($z1_12 - l_discount)) as revenue
 from
     $j5
 group by

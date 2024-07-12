@@ -1,6 +1,6 @@
 #include "federated_write_session.h"
 
-#include <ydb/public/sdk/cpp/client/ydb_topic/impl/log_lazy.h>
+#include <ydb/public/sdk/cpp/client/ydb_topic/common/log_lazy.h>
 #include <ydb/public/sdk/cpp/client/ydb_topic/impl/topic_impl.h>
 
 #define INCLUDE_YDB_INTERNAL_H
@@ -19,7 +19,7 @@ bool DatabasesAreSame(std::shared_ptr<TDbInfo> lhs, std::shared_ptr<TDbInfo> rhs
     if (!lhs || !rhs) {
         return false;
     }
-    return lhs->path() == rhs->path() && lhs->endpoint() == rhs->endpoint();
+    return lhs->name() == rhs->name() && lhs->path() == rhs->path() && lhs->endpoint() == rhs->endpoint();
 }
 
 NTopic::TTopicClientSettings FromFederated(const TFederatedTopicClientSettings& settings);
@@ -106,27 +106,37 @@ void TFederatedWriteSessionImpl::Start() {
 
 void TFederatedWriteSessionImpl::OpenSubsessionImpl(std::shared_ptr<TDbInfo> db) {
     Y_ABORT_UNLESS(Lock.IsLocked());
+
+    ++SubsessionGeneration;
+
     if (Subsession) {
         PendingToken.Clear();
-        Subsession->Close(TDuration::Zero());
+        OldSubsession = std::move(Subsession);
+        OldSubsession->Close(TDuration::Zero());
     }
+
     auto clientSettings = SubclientSettings;
     clientSettings
         .Database(db->path())
         .DiscoveryEndpoint(db->endpoint());
     auto subclient = make_shared<NTopic::TTopicClient::TImpl>(Connections, clientSettings);
-    subclient->SetProvidedCodecs(ProvidedCodecs);
 
     auto handlers = NTopic::TWriteSessionSettings::TEventHandlers()
         .HandlersExecutor(Settings.EventHandlers_.HandlersExecutor_)
-        .ReadyToAcceptHandler([selfCtx = SelfContext](NTopic::TWriteSessionEvent::TReadyToAcceptEvent& ev) {
+        .ReadyToAcceptHandler([selfCtx = SelfContext, generation = SubsessionGeneration](NTopic::TWriteSessionEvent::TReadyToAcceptEvent& ev) {
             if (auto self = selfCtx->LockShared()) {
-                TDeferredWrite deferred(self->Subsession);
+                TDeferredWrite deferred;
+
                 with_lock(self->Lock) {
+                    if (generation != self->SubsessionGeneration) {
+                        return;
+                    }
+
                     Y_ABORT_UNLESS(self->PendingToken.Empty());
                     self->PendingToken = std::move(ev.ContinuationToken);
                     self->PrepareDeferredWriteImpl(deferred);
                 }
+
                 deferred.DoWrite();
             }
         })
@@ -149,9 +159,17 @@ void TFederatedWriteSessionImpl::OpenSubsessionImpl(std::shared_ptr<TDbInfo> db)
                 self->IssueTokenIfAllowed();
             }
         })
-        .SessionClosedHandler([selfCtx = SelfContext](const NTopic::TSessionClosedEvent & ev) {
+        .SessionClosedHandler([selfCtx = SelfContext, generation = SubsessionGeneration](const NTopic::TSessionClosedEvent & ev) {
+            if (ev.IsSuccess()) {
+                // The subsession was closed by the federated write session itself while creating a new subsession.
+                // In this case we get SUCCESS status and don't need to propagate it further.
+                return;
+            }
             if (auto self = selfCtx->LockShared()) {
-                with_lock(self->Lock) {
+                with_lock (self->Lock) {
+                    if (generation != self->SubsessionGeneration) {
+                        return;
+                    }
                     self->CloseImpl(ev);
                 }
             }
@@ -294,8 +312,10 @@ void TFederatedWriteSessionImpl::ScheduleFederationStateUpdateImpl(TDuration del
     auto cb = [selfCtx = SelfContext](bool ok) {
         if (ok) {
             if (auto self = selfCtx->LockShared()) {
+                std::shared_ptr<NTopic::IWriteSession> old;
                 with_lock(self->Lock) {
                     self->UpdateFederationStateImpl();
+                    old = std::move(self->OldSubsession);
                 }
             }
         }
@@ -385,6 +405,7 @@ bool TFederatedWriteSessionImpl::PrepareDeferredWriteImpl(TDeferredWrite& deferr
     }
     OriginalMessagesToGetAck.push_back(std::move(OriginalMessagesToPassDown.front()));
     OriginalMessagesToPassDown.pop_front();
+    deferred.Writer = Subsession;
     deferred.Token.ConstructInPlace(std::move(*PendingToken));
     deferred.Message.ConstructInPlace(std::move(OriginalMessagesToGetAck.back().Message));
     PendingToken.Clear();

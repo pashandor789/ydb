@@ -187,7 +187,7 @@ bool TPathElement::IsContainer() const {
 }
 
 bool TPathElement::IsLikeDirectory() const {
-    return IsDirectory() || IsDomainRoot() || IsOlapStore();
+    return IsDirectory() || IsDomainRoot() || IsOlapStore() || IsTableIndex();
 }
 
 bool TPathElement::HasActiveChanges() const {
@@ -217,6 +217,14 @@ bool TPathElement::IsExternalDataSource() const {
 
 bool TPathElement::IsView() const {
     return PathType == EPathType::EPathTypeView;
+}
+
+bool TPathElement::IsTemporary() const {
+    return !!TempDirOwnerActorId;
+}
+
+bool TPathElement::IsResourcePool() const {
+    return PathType == EPathType::EPathTypeResourcePool;
 }
 
 void TPathElement::SetDropped(TStepId step, TTxId txId) {

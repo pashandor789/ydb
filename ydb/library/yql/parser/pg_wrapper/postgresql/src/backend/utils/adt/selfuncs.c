@@ -10,7 +10,7 @@
  *	  Index cost functions are located via the index AM's API struct,
  *	  which is obtained from the handler function registered in pg_am.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -3596,7 +3596,6 @@ estimate_num_groups(PlannerInfo *root, List *groupExprs, double input_rows,
 					 */
 					if (estinfo != NULL && varinfo2->isdefault)
 						estinfo->flags |= SELFLAG_USED_DEFAULT;
-
 				}
 
 				/* we're done with this relation */
@@ -3913,21 +3912,10 @@ estimate_multivariate_ndistinct(PlannerInfo *root, RelOptInfo *rel,
 	Oid			statOid = InvalidOid;
 	MVNDistinct *stats;
 	StatisticExtInfo *matched_info = NULL;
-	RangeTblEntry		*rte;
+	RangeTblEntry *rte = planner_rt_fetch(rel->relid, root);
 
 	/* bail out immediately if the table has no extended statistics */
 	if (!rel->statlist)
-		return false;
-
-	/*
-	 * When dealing with regular inheritance trees, ignore extended stats
-	 * (which were built without data from child rels, and thus do not
-	 * represent them). For partitioned tables data there's no data in the
-	 * non-leaf relations, so we build stats only for the inheritance tree.
-	 * So for partitioned tables we do consider extended stats.
-	 */
-	rte = planner_rt_fetch(rel->relid, root);
-	if (rte->inh && rte->relkind != RELKIND_PARTITIONED_TABLE)
 		return false;
 
 	/* look for the ndistinct statistics object matching the most vars */
@@ -3942,6 +3930,10 @@ estimate_multivariate_ndistinct(PlannerInfo *root, RelOptInfo *rel,
 
 		/* skip statistics of other kinds */
 		if (info->kind != STATS_EXT_NDISTINCT)
+			continue;
+
+		/* skip statistics with mismatching stxdinherit value */
+		if (info->inherit != rte->inh)
 			continue;
 
 		/*
@@ -4015,7 +4007,7 @@ estimate_multivariate_ndistinct(PlannerInfo *root, RelOptInfo *rel,
 
 	Assert(nmatches_vars + nmatches_exprs > 1);
 
-	stats = statext_ndistinct_load(statOid);
+	stats = statext_ndistinct_load(statOid, rte->inh);
 
 	/*
 	 * If we have a match, search it for the specific item that matches (there
@@ -4305,6 +4297,7 @@ convert_to_scalar(Datum value, Oid valuetypid, Oid collid, double *scaledvalue,
 		case REGOPERATOROID:
 		case REGCLASSOID:
 		case REGTYPEOID:
+		case REGCOLLATIONOID:
 		case REGCONFIGOID:
 		case REGDICTIONARYOID:
 		case REGROLEOID:
@@ -4436,6 +4429,7 @@ convert_numeric_to_scalar(Datum value, Oid typid, bool *failure)
 		case REGOPERATOROID:
 		case REGCLASSOID:
 		case REGTYPEOID:
+		case REGCOLLATIONOID:
 		case REGCONFIGOID:
 		case REGDICTIONARYOID:
 		case REGROLEOID:
@@ -5234,7 +5228,7 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 		foreach(slist, onerel->statlist)
 		{
 			StatisticExtInfo *info = (StatisticExtInfo *) lfirst(slist);
-			RangeTblEntry	 *rte = planner_rt_fetch(onerel->relid, root);
+			RangeTblEntry *rte = planner_rt_fetch(onerel->relid, root);
 			ListCell   *expr_item;
 			int			pos;
 
@@ -5245,19 +5239,12 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 			if (vardata->statsTuple)
 				break;
 
-			/*
-			 * When dealing with regular inheritance trees, ignore extended
-			 * stats (which were built without data from child rels, and thus
-			 * do not represent them). For partitioned tables data there's no
-			 * data in the non-leaf relations, so we build stats only for the
-			 * inheritance tree. So for partitioned tables we do consider
-			 * extended stats.
-			 */
-			if (rte->inh && rte->relkind != RELKIND_PARTITIONED_TABLE)
-				break;
-
 			/* skip stats without per-expression stats */
 			if (info->kind != STATS_EXT_EXPRESSIONS)
+				continue;
+
+			/* skip stats with mismatching stxdinherit value */
+			if (info->inherit != rte->inh)
 				continue;
 
 			pos = 0;
@@ -5274,22 +5261,16 @@ examine_variable(PlannerInfo *root, Node *node, int varRelid,
 				/* found a match, see if we can extract pg_statistic row */
 				if (equal(node, expr))
 				{
-					HeapTuple	t = statext_expressions_load(info->statOid, pos);
-
-					/* Get statistics object's table for permission check */
-					RangeTblEntry *rte;
 					Oid			userid;
-
-					vardata->statsTuple = t;
 
 					/*
 					 * XXX Not sure if we should cache the tuple somewhere.
 					 * Now we just create a new copy every time.
 					 */
-					vardata->freefunc = ReleaseDummy;
+					vardata->statsTuple =
+						statext_expressions_load(info->statOid, rte->inh, pos);
 
-					rte = planner_rt_fetch(onerel->relid, root);
-					Assert(rte->rtekind == RTE_RELATION);
+					vardata->freefunc = ReleaseDummy;
 
 					/*
 					 * Use checkAsUser if it's set, in case we're accessing
@@ -5966,7 +5947,7 @@ get_stats_slot_range(AttStatsSlot *sslot, Oid opfuncoid, FmgrInfo *opproc,
  *		and fetching its low and/or high values.
  *		If successful, store values in *min and *max, and return true.
  *		(Either pointer can be NULL if that endpoint isn't needed.)
- *		If no data available, return false.
+ *		If unsuccessful, return false.
  *
  * sortop is the "<" comparison operator to use.
  * collation is the required collation.
@@ -6095,11 +6076,11 @@ get_actual_variable_range(PlannerInfo *root, VariableStatData *vardata,
 			}
 			else
 			{
-				/* If min not requested, assume index is nonempty */
+				/* If min not requested, still want to fetch max */
 				have_data = true;
 			}
 
-			/* If max is requested, and we didn't find the index is empty */
+			/* If max is requested, and we didn't already fail ... */
 			if (max && have_data)
 			{
 				/* scan in the opposite direction; all else is the same */
@@ -6133,7 +6114,7 @@ get_actual_variable_range(PlannerInfo *root, VariableStatData *vardata,
 
 /*
  * Get one endpoint datum (min or max depending on indexscandir) from the
- * specified index.  Return true if successful, false if index is empty.
+ * specified index.  Return true if successful, false if not.
  * On success, endpoint value is stored to *endpointDatum (and copied into
  * outercontext).
  *
@@ -6143,6 +6124,9 @@ get_actual_variable_range(PlannerInfo *root, VariableStatData *vardata,
  * to probe the heap.
  * (We could compute these values locally, but that would mean computing them
  * twice when get_actual_variable_range needs both the min and the max.)
+ *
+ * Failure occurs either when the index is empty, or we decide that it's
+ * taking too long to find a suitable tuple.
  */
 static bool
 get_actual_variable_endpoint(Relation heapRel,
@@ -6159,6 +6143,8 @@ get_actual_variable_endpoint(Relation heapRel,
 	SnapshotData SnapshotNonVacuumable;
 	IndexScanDesc index_scan;
 	Buffer		vmbuffer = InvalidBuffer;
+	BlockNumber last_heap_block = InvalidBlockNumber;
+	int			n_visited_heap_pages = 0;
 	ItemPointer tid;
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
@@ -6201,6 +6187,12 @@ get_actual_variable_endpoint(Relation heapRel,
 	 * might get a bogus answer that's not close to the index extremal value,
 	 * or could even be NULL.  We avoid this hazard because we take the data
 	 * from the index entry not the heap.
+	 *
+	 * Despite all this care, there are situations where we might find many
+	 * non-visible tuples near the end of the index.  We don't want to expend
+	 * a huge amount of time here, so we give up once we've read too many heap
+	 * pages.  When we fail for that reason, the caller will end up using
+	 * whatever extremal value is recorded in pg_statistic.
 	 */
 	InitNonVacuumableSnapshot(SnapshotNonVacuumable,
 							  GlobalVisTestFor(heapRel));
@@ -6215,13 +6207,37 @@ get_actual_variable_endpoint(Relation heapRel,
 	/* Fetch first/next tuple in specified direction */
 	while ((tid = index_getnext_tid(index_scan, indexscandir)) != NULL)
 	{
+		BlockNumber block = ItemPointerGetBlockNumber(tid);
+
 		if (!VM_ALL_VISIBLE(heapRel,
-							ItemPointerGetBlockNumber(tid),
+							block,
 							&vmbuffer))
 		{
 			/* Rats, we have to visit the heap to check visibility */
 			if (!index_fetch_heap(index_scan, tableslot))
+			{
+				/*
+				 * No visible tuple for this index entry, so we need to
+				 * advance to the next entry.  Before doing so, count heap
+				 * page fetches and give up if we've done too many.
+				 *
+				 * We don't charge a page fetch if this is the same heap page
+				 * as the previous tuple.  This is on the conservative side,
+				 * since other recently-accessed pages are probably still in
+				 * buffers too; but it's good enough for this heuristic.
+				 */
+#define VISITED_PAGES_LIMIT 100
+
+				if (block != last_heap_block)
+				{
+					last_heap_block = block;
+					n_visited_heap_pages++;
+					if (n_visited_heap_pages > VISITED_PAGES_LIMIT)
+						break;
+				}
+
 				continue;		/* no visible tuple, try next index entry */
+			}
 
 			/* We don't actually need the heap tuple for anything */
 			ExecClearTuple(tableslot);

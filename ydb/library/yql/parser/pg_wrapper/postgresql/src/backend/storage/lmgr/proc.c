@@ -3,7 +3,7 @@
  * proc.c
  *	  routines to manage per-process shared memory data structure
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -37,7 +37,7 @@
 
 #include "access/transam.h"
 #include "access/twophase.h"
-#include "access/xact.h"
+#include "access/xlogutils.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
@@ -177,8 +177,6 @@ InitProcGlobal(void)
 	ProcGlobal->autovacFreeProcs = NULL;
 	ProcGlobal->bgworkerFreeProcs = NULL;
 	ProcGlobal->walsenderFreeProcs = NULL;
-	ProcGlobal->startupProc = NULL;
-	ProcGlobal->startupProcPid = 0;
 	ProcGlobal->startupBufferPinWaitBufId = -1;
 	ProcGlobal->walwriterLatch = NULL;
 	ProcGlobal->checkpointerLatch = NULL;
@@ -394,12 +392,12 @@ InitProcess(void)
 	MyProc->roleId = InvalidOid;
 	MyProc->tempNamespaceId = InvalidOid;
 	MyProc->isBackgroundWorker = IsBackgroundWorker;
-	MyProc->delayChkpt = false;
+	MyProc->delayChkptFlags = 0;
 	MyProc->statusFlags = 0;
 	/* NB -- autovac launcher intentionally does not set IS_AUTOVACUUM */
 	if (IsAutoVacuumWorkerProcess())
 		MyProc->statusFlags |= PROC_IS_AUTOVACUUM;
-	MyProc->lwWaiting = false;
+	MyProc->lwWaiting = LW_WS_NOT_WAITING;
 	MyProc->lwWaitMode = 0;
 	MyProc->waitLock = NULL;
 	MyProc->waitProcLock = NULL;
@@ -579,9 +577,9 @@ InitAuxiliaryProcess(void)
 	MyProc->roleId = InvalidOid;
 	MyProc->tempNamespaceId = InvalidOid;
 	MyProc->isBackgroundWorker = IsBackgroundWorker;
-	MyProc->delayChkpt = false;
+	MyProc->delayChkptFlags = 0;
 	MyProc->statusFlags = 0;
-	MyProc->lwWaiting = false;
+	MyProc->lwWaiting = LW_WS_NOT_WAITING;
 	MyProc->lwWaitMode = 0;
 	MyProc->waitLock = NULL;
 	MyProc->waitProcLock = NULL;
@@ -622,21 +620,6 @@ InitAuxiliaryProcess(void)
 	 * Arrange to clean up at process exit.
 	 */
 	on_shmem_exit(AuxiliaryProcKill, Int32GetDatum(proctype));
-}
-
-/*
- * Record the PID and PGPROC structures for the Startup process, for use in
- * ProcSendSignal().  See comments there for further explanation.
- */
-void
-PublishStartupProcessInformation(void)
-{
-	SpinLockAcquire(ProcStructLock);
-
-	ProcGlobal->startupProc = MyProc;
-	ProcGlobal->startupProcPid = MyProcPid;
-
-	SpinLockRelease(ProcStructLock);
 }
 
 /*
@@ -824,6 +807,10 @@ ProcKill(int code, Datum arg)
 
 	Assert(MyProc != NULL);
 
+	/* not safe if forked by system(), etc. */
+	if (MyProc->pid != (int) getpid())
+		elog(PANIC, "ProcKill() called in child process");
+
 	/* Make sure we're out of the sync rep lists */
 	SyncRepCleanupAtProcExit();
 
@@ -846,13 +833,6 @@ ProcKill(int code, Datum arg)
 
 	/* Cancel any pending condition variable sleep, too */
 	ConditionVariableCancelSleep();
-
-	/* Make sure active replication slots are released */
-	if (MyReplicationSlot != NULL)
-		ReplicationSlotRelease();
-
-	/* Also cleanup all the temporary slots. */
-	ReplicationSlotCleanup();
 
 	/*
 	 * Detach from any lock group of which we are a member.  If the leader
@@ -952,6 +932,10 @@ AuxiliaryProcKill(int code, Datum arg)
 	PGPROC	   *proc;
 
 	Assert(proctype >= 0 && proctype < NUM_AUXILIARY_PROCS);
+
+	/* not safe if forked by system(), etc. */
+	if (MyProc->pid != (int) getpid())
+		elog(PANIC, "AuxiliaryProcKill() called in child process");
 
 	auxproc = &AuxiliaryProcs[proctype];
 
@@ -1074,25 +1058,25 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 	uint32		hashcode = locallock->hashcode;
 	LWLock	   *partitionLock = LockHashPartitionLock(hashcode);
 	PROC_QUEUE *waitQueue = &(lock->waitProcs);
+	SHM_QUEUE  *waitQueuePos;
 	LOCKMASK	myHeldLocks = MyProc->heldLocks;
 	TimestampTz standbyWaitStart = 0;
 	bool		early_deadlock = false;
 	bool		allow_autovacuum_cancel = true;
 	bool		logged_recovery_conflict = false;
 	ProcWaitStatus myWaitStatus;
-	PGPROC	   *proc;
 	PGPROC	   *leader = MyProc->lockGroupLeader;
 	int			i;
 
 	/*
 	 * If group locking is in use, locks held by members of my locking group
 	 * need to be included in myHeldLocks.  This is not required for relation
-	 * extension or page locks which conflict among group members. However,
-	 * including them in myHeldLocks will give group members the priority to
-	 * get those locks as compared to other backends which are also trying to
-	 * acquire those locks.  OTOH, we can avoid giving priority to group
-	 * members for that kind of locks, but there doesn't appear to be a clear
-	 * advantage of the same.
+	 * extension lock which conflict among group members. However, including
+	 * them in myHeldLocks will give group members the priority to get those
+	 * locks as compared to other backends which are also trying to acquire
+	 * those locks.  OTOH, we can avoid giving priority to group members for
+	 * that kind of locks, but there doesn't appear to be a clear advantage of
+	 * the same.
 	 */
 	if (leader != NULL)
 	{
@@ -1128,13 +1112,16 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 	 * we are only considering the part of the wait queue before my insertion
 	 * point.
 	 */
-	if (myHeldLocks != 0)
+	if (myHeldLocks != 0 && waitQueue->size > 0)
 	{
 		LOCKMASK	aheadRequests = 0;
+		SHM_QUEUE  *proc_node;
 
-		proc = (PGPROC *) waitQueue->links.next;
+		proc_node = waitQueue->links.next;
 		for (i = 0; i < waitQueue->size; i++)
 		{
+			PGPROC	   *proc = (PGPROC *) proc_node;
+
 			/*
 			 * If we're part of the same locking group as this waiter, its
 			 * locks neither conflict with ours nor contribute to
@@ -1142,7 +1129,7 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 			 */
 			if (leader != NULL && leader == proc->lockGroupLeader)
 			{
-				proc = (PGPROC *) proc->links.next;
+				proc_node = proc->links.next;
 				continue;
 			}
 			/* Must he wait for me? */
@@ -1177,24 +1164,25 @@ ProcSleep(LOCALLOCK *locallock, LockMethod lockMethodTable)
 			}
 			/* Nope, so advance to next waiter */
 			aheadRequests |= LOCKBIT_ON(proc->waitLockMode);
-			proc = (PGPROC *) proc->links.next;
+			proc_node = proc->links.next;
 		}
 
 		/*
-		 * If we fall out of loop normally, proc points to waitQueue head, so
-		 * we will insert at tail of queue as desired.
+		 * If we iterated through the whole queue, cur points to the waitQueue
+		 * head, so we will insert at tail of queue as desired.
 		 */
+		waitQueuePos = proc_node;
 	}
 	else
 	{
 		/* I hold no locks, so I can't push in front of anyone. */
-		proc = (PGPROC *) &(waitQueue->links);
+		waitQueuePos = &waitQueue->links;
 	}
 
 	/*
-	 * Insert self into queue, ahead of the given proc (or at tail of queue).
+	 * Insert self into queue, at the position determined above.
 	 */
-	SHMQueueInsertBefore(&(proc->links), &(MyProc->links));
+	SHMQueueInsertBefore(waitQueuePos, &MyProc->links);
 	waitQueue->size++;
 
 	lock->waitMask |= LOCKBIT_ON(lockmode);
@@ -1905,38 +1893,15 @@ ProcWaitForSignal(uint32 wait_event_info)
 }
 
 /*
- * ProcSendSignal - send a signal to a backend identified by PID
+ * ProcSendSignal - set the latch of a backend identified by pgprocno
  */
 void
-ProcSendSignal(int pid)
+ProcSendSignal(int pgprocno)
 {
-	PGPROC	   *proc = NULL;
+	if (pgprocno < 0 || pgprocno >= ProcGlobal->allProcCount)
+		elog(ERROR, "pgprocno out of range");
 
-	if (RecoveryInProgress())
-	{
-		SpinLockAcquire(ProcStructLock);
-
-		/*
-		 * Check to see whether it is the Startup process we wish to signal.
-		 * This call is made by the buffer manager when it wishes to wake up a
-		 * process that has been waiting for a pin in so it can obtain a
-		 * cleanup lock using LockBufferForCleanup(). Startup is not a normal
-		 * backend, so BackendPidGetProc() will not return any pid at all. So
-		 * we remember the information for this special case.
-		 */
-		if (pid == ProcGlobal->startupProcPid)
-			proc = ProcGlobal->startupProc;
-
-		SpinLockRelease(ProcStructLock);
-	}
-
-	if (proc == NULL)
-		proc = BackendPidGetProc(pid);
-
-	if (proc != NULL)
-	{
-		SetLatch(&proc->procLatch);
-	}
+	SetLatch(&ProcGlobal->allProcs[pgprocno].procLatch);
 }
 
 /*

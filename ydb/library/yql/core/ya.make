@@ -72,6 +72,7 @@ PEERDIR(
     ydb/library/yql/core/url_preprocessing/interface
     ydb/library/yql/minikql
     ydb/library/yql/minikql/jsonpath
+    ydb/library/minsketch
     ydb/library/yql/protos
     ydb/library/yql/public/udf
     ydb/library/yql/public/udf/tz
@@ -108,6 +109,7 @@ RECURSE(
     file_storage
     issue
     peephole_opt
+    qplayer
     services
     spilling
     sql_types

@@ -3,7 +3,7 @@
  * dependencies.c
  *	  POSTGRES functional dependencies
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -199,7 +199,6 @@ DependencyGenerator_free(DependencyGenerator state)
 {
 	pfree(state->dependencies);
 	pfree(state);
-
 }
 
 /* generate next combination */
@@ -355,7 +354,7 @@ statext_dependencies_build(StatsBuildData *data)
 
 	/* result */
 	MVDependencies *dependencies = NULL;
-	MemoryContext	cxt;
+	MemoryContext cxt;
 
 	Assert(data->nattnums >= 2);
 
@@ -619,14 +618,16 @@ dependency_is_fully_matched(MVDependency *dependency, Bitmapset *attnums)
  *		Load the functional dependencies for the indicated pg_statistic_ext tuple
  */
 MVDependencies *
-statext_dependencies_load(Oid mvoid)
+statext_dependencies_load(Oid mvoid, bool inh)
 {
 	MVDependencies *result;
 	bool		isnull;
 	Datum		deps;
 	HeapTuple	htup;
 
-	htup = SearchSysCache1(STATEXTDATASTXOID, ObjectIdGetDatum(mvoid));
+	htup = SearchSysCache2(STATEXTDATASTXOID,
+						   ObjectIdGetDatum(mvoid),
+						   BoolGetDatum(inh));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for statistics object %u", mvoid);
 
@@ -1162,13 +1163,12 @@ clauselist_apply_dependencies(PlannerInfo *root, List *clauses,
  *		Determines if the expression is compatible with functional dependencies
  *
  * Similar to dependency_is_compatible_clause, but doesn't enforce that the
- * expression is a simple Var. OTOH we check that there's at least one
- * statistics object matching the expression.
+ * expression is a simple Var.  On success, return the matching statistics
+ * expression into *expr.
  */
 static bool
 dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, Node **expr)
 {
-	List	   *vars;
 	ListCell   *lc,
 			   *lc2;
 	Node	   *clause_expr;
@@ -1316,29 +1316,8 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 	if (IsA(clause_expr, RelabelType))
 		clause_expr = (Node *) ((RelabelType *) clause_expr)->arg;
 
-	vars = pull_var_clause(clause_expr, 0);
-
-	foreach(lc, vars)
-	{
-		Var		   *var = (Var *) lfirst(lc);
-
-		/* Ensure Var is from the correct relation */
-		if (var->varno != relid)
-			return false;
-
-		/* We also better ensure the Var is from the current level */
-		if (var->varlevelsup != 0)
-			return false;
-
-		/* Also ignore system attributes (we don't allow stats on those) */
-		if (!AttrNumberIsForUserDefinedAttr(var->varattno))
-			return false;
-	}
-
 	/*
-	 * Check if we actually have a matching statistics for the expression.
-	 *
-	 * XXX Maybe this is an overkill. We'll eliminate the expressions later.
+	 * Search for a matching statistics expression.
 	 */
 	foreach(lc, statlist)
 	{
@@ -1416,16 +1395,6 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 	/* unique expressions */
 	Node	  **unique_exprs;
 	int			unique_exprs_cnt;
-
-	/*
-	 * When dealing with regular inheritance trees, ignore extended stats
-	 * (which were built without data from child rels, and thus do not
-	 * represent them). For partitioned tables data there's no data in the
-	 * non-leaf relations, so we build stats only for the inheritance tree.
-	 * So for partitioned tables we do consider extended stats.
-	 */
-	if (rte->inh && rte->relkind != RELKIND_PARTITIONED_TABLE)
-		return 1.0;
 
 	/* check if there's any stats that might be useful for us. */
 	if (!has_stats_of_kind(rel->statlist, STATS_EXT_DEPENDENCIES))
@@ -1610,6 +1579,10 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 		if (stat->kind != STATS_EXT_DEPENDENCIES)
 			continue;
 
+		/* skip statistics with mismatching stxdinherit value */
+		if (stat->inherit != rte->inh)
+			continue;
+
 		/*
 		 * Count matching attributes - we have to undo the attnum offsets. The
 		 * input attribute numbers are not offset (expressions are not
@@ -1656,7 +1629,7 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 		if (nmatched + nexprs < 2)
 			continue;
 
-		deps = statext_dependencies_load(stat->statOid);
+		deps = statext_dependencies_load(stat->statOid, rte->inh);
 
 		/*
 		 * The expressions may be represented by different attnums in the

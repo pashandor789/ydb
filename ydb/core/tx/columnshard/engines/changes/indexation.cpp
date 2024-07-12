@@ -50,6 +50,98 @@ void TInsertColumnEngineChanges::DoOnFinish(NColumnShard::TColumnShard& self, TC
     self.BackgroundController.FinishIndexing(*this);
 }
 
+namespace {
+
+class TBatchInfo {
+private:
+    YDB_READONLY_DEF(std::shared_ptr<arrow::RecordBatch>, Batch);
+    const NEvWrite::EModificationType ModificationType;
+public:
+    TBatchInfo(const std::shared_ptr<arrow::RecordBatch>& batch, const NEvWrite::EModificationType modificationType)
+        : Batch(batch)
+        , ModificationType(modificationType)
+    {
+
+    }
+
+    bool GetIsDeletion() const {
+        return ModificationType == NEvWrite::EModificationType::Delete;
+    }
+};
+
+class TPathData {
+private:
+    std::vector<TBatchInfo> Batches;
+    YDB_READONLY_DEF(std::optional<TGranuleShardingInfo>, ShardingInfo);
+    bool HasDeletionFlag = false;
+public:
+    TPathData(const std::optional<TGranuleShardingInfo>& shardingInfo)
+        : ShardingInfo(shardingInfo)
+    {
+    
+    }
+
+    bool HasDeletion() {
+        return HasDeletionFlag;
+    }
+
+    void AddBatch(const NOlap::TInsertedData& data, const std::shared_ptr<arrow::RecordBatch>& batch) {
+        if (data.GetMeta().GetModificationType() == NEvWrite::EModificationType::Delete) {
+            HasDeletionFlag = true;
+        }
+        AFL_VERIFY(batch);
+        Batches.emplace_back(batch, data.GetMeta().GetModificationType());
+    }
+
+    void AddShardingInfo(const std::optional<TGranuleShardingInfo>& info) {
+        if (!info) {
+            ShardingInfo.reset();
+        } else if (ShardingInfo && info->GetSnapshotVersion() < ShardingInfo->GetSnapshotVersion()) {
+            ShardingInfo = info;
+        }
+    }
+
+    std::shared_ptr<arrow::RecordBatch> Merge(const TIndexInfo& indexInfo) const {
+        auto fullSchema = indexInfo.ArrowSchemaWithSpecials();
+        NArrow::NMerger::TMergePartialStream stream(indexInfo.GetReplaceKey(), fullSchema, false, IIndexInfo::GetSnapshotColumnNames());
+        THashMap<std::string, ui64> fieldSizes;
+        ui64 rowsCount = 0;
+        for (auto&& batch : Batches) {
+            auto& forMerge = batch.GetBatch();
+            stream.AddSource(forMerge, nullptr);
+            for (ui32 cIdx = 0; cIdx < (ui32)forMerge->num_columns(); ++cIdx) {
+                fieldSizes[forMerge->column_name(cIdx)] += NArrow::GetArrayDataSize(forMerge->column(cIdx));
+            }
+            rowsCount += forMerge->num_rows();
+        }
+
+        NArrow::NMerger::TRecordBatchBuilder builder(fullSchema->fields(), rowsCount, fieldSizes);
+        stream.SetPossibleSameVersion(true);
+        stream.DrainAll(builder);
+        return builder.Finalize();
+    }
+};
+
+class TPathesData {
+private:
+    THashMap<ui64, TPathData> Data;
+
+public:
+    const THashMap<ui64, TPathData>& GetData() const {
+        return Data;
+    }
+
+    void Add(const NOlap::TInsertedData& inserted, const std::optional<TGranuleShardingInfo>& info, const std::shared_ptr<arrow::RecordBatch>& batch) {
+        auto it = Data.find(inserted.PathId);
+        if (it == Data.end()) {
+            it = Data.emplace(inserted.PathId, info).first;
+        }
+        it->second.AddShardingInfo(info);
+        it->second.AddBatch(inserted, batch);
+    }
+};
+}
+
 TConclusionStatus TInsertColumnEngineChanges::DoConstructBlobs(TConstructionContext& context) noexcept {
     Y_ABORT_UNLESS(!DataToIndex.empty());
     Y_ABORT_UNLESS(AppendedPortions.empty());
@@ -67,9 +159,11 @@ TConclusionStatus TInsertColumnEngineChanges::DoConstructBlobs(TConstructionCont
     auto resultSchema = context.SchemaVersions.GetSchema(maxSnapshot);
     Y_ABORT_UNLESS(resultSchema->GetIndexInfo().IsSorted());
 
-    THashMap<ui64, std::vector<std::shared_ptr<arrow::RecordBatch>>> pathBatches;
+    TPathesData pathBatches;
     for (auto& inserted : DataToIndex) {
         const TBlobRange& blobRange = inserted.GetBlobRange();
+
+        auto shardingFilterCommit = context.SchemaVersions.GetShardingInfoOptional(inserted.PathId, inserted.GetSnapshot());
 
         auto blobSchema = context.SchemaVersions.GetSchemaVerified(inserted.GetSchemaVersion());
         auto& indexInfo = blobSchema->GetIndexInfo();
@@ -88,32 +182,21 @@ TConclusionStatus TInsertColumnEngineChanges::DoConstructBlobs(TConstructionCont
         }
 
         batch = AddSpecials(batch, indexInfo, inserted);
-        batch = resultSchema->NormalizeBatch(*blobSchema, batch);
-        pathBatches[inserted.PathId].push_back(batch);
-        Y_DEBUG_ABORT_UNLESS(NArrow::IsSorted(pathBatches[inserted.PathId].back(), resultSchema->GetIndexInfo().GetReplaceKey()));
+        batch = resultSchema->NormalizeBatch(*blobSchema, batch).DetachResult();
+        pathBatches.Add(inserted, shardingFilterCommit, batch);
+        Y_DEBUG_ABORT_UNLESS(NArrow::IsSorted(batch, resultSchema->GetIndexInfo().GetReplaceKey()));
     }
 
     Y_ABORT_UNLESS(Blobs.IsEmpty());
     const std::vector<std::string> comparableColumns = resultSchema->GetIndexInfo().GetReplaceKey()->field_names();
-    for (auto& [pathId, batches] : pathBatches) {
-        NArrow::NMerger::TMergePartialStream stream(resultSchema->GetIndexInfo().GetReplaceKey(), resultSchema->GetIndexInfo().ArrowSchemaWithSpecials(), false, IIndexInfo::GetSpecialColumnNames());
-        THashMap<std::string, ui64> fieldSizes;
-        ui64 rowsCount = 0;
-        for (auto&& batch : batches) {
-            stream.AddSource(batch, nullptr);
-            for (ui32 cIdx = 0; cIdx < (ui32)batch->num_columns(); ++cIdx) {
-                fieldSizes[batch->column_name(cIdx)] += NArrow::GetArrayDataSize(batch->column(cIdx));
-            }
-            rowsCount += batch->num_rows();
-        }
-
-        NArrow::NMerger::TRecordBatchBuilder builder(resultSchema->GetIndexInfo().ArrowSchemaWithSpecials()->fields(), rowsCount, fieldSizes);
-        stream.SetPossibleSameVersion(true);
-        stream.DrainAll(builder);
+    for (auto& [pathId, pathInfo] : pathBatches.GetData()) {
+        auto shardingFilter = context.SchemaVersions.GetShardingInfoActual(pathId);
+        auto mergedBatch = pathInfo.Merge(resultSchema->GetIndexInfo());
 
         auto itGranule = PathToGranule.find(pathId);
         AFL_VERIFY(itGranule != PathToGranule.end());
-        std::vector<std::shared_ptr<arrow::RecordBatch>> result = NArrow::NMerger::TSortableBatchPosition::SplitByBordersInSequentialContainer(builder.Finalize(), comparableColumns, itGranule->second);
+        std::vector<std::shared_ptr<arrow::RecordBatch>> result = NArrow::NMerger::TRWSortableBatchPosition::
+            SplitByBordersInSequentialContainer(mergedBatch, comparableColumns, itGranule->second);
         for (auto&& b : result) {
             if (!b) {
                 continue;
@@ -127,21 +210,23 @@ TConclusionStatus TInsertColumnEngineChanges::DoConstructBlobs(TConstructionCont
             auto portions = MakeAppendedPortions(b, pathId, maxSnapshot, nullptr, context, externalSaver);
             Y_ABORT_UNLESS(portions.size());
             for (auto& portion : portions) {
-                AppendedPortions.emplace_back(std::move(portion));
+                if (pathInfo.GetShardingInfo()) {
+                    portion.GetPortionConstructor().SetShardingVersion(pathInfo.GetShardingInfo()->GetSnapshotVersion());
+                }
+                AppendedPortions.emplace_back(TWritePortionInfoWithBlobsResult(std::move(portion)));
             }
         }
     }
 
-    Y_ABORT_UNLESS(PathToGranule.size() == pathBatches.size());
+    Y_ABORT_UNLESS(PathToGranule.size() == pathBatches.GetData().size());
     return TConclusionStatus::Success();
 }
 
 std::shared_ptr<arrow::RecordBatch> TInsertColumnEngineChanges::AddSpecials(const std::shared_ptr<arrow::RecordBatch>& srcBatch,
     const TIndexInfo& indexInfo, const TInsertedData& inserted) const {
-    auto batch = TIndexInfo::AddSpecialColumns(srcBatch, inserted.GetSnapshot());
-    Y_ABORT_UNLESS(batch);
-
-    return NArrow::ExtractColumns(batch, indexInfo.ArrowSchemaWithSpecials());
+    auto batch = IIndexInfo::AddSnapshotColumns(srcBatch, inserted.GetSnapshot());
+    batch = IIndexInfo::AddDeleteFlagsColumn(batch, inserted.GetMeta().GetModificationType() == NEvWrite::EModificationType::Delete);
+    return NArrow::TColumnOperator().Adapt(batch, indexInfo.ArrowSchemaWithSpecials()).DetachResult();
 }
 
 NColumnShard::ECumulativeCounters TInsertColumnEngineChanges::GetCounterIndex(const bool isSuccess) const {

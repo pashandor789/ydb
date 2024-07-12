@@ -2,7 +2,7 @@
 
 #include "common.h"
 
-#include <ydb/core/protos/tx_columnshard.pb.h>
+#include <ydb/core/tx/columnshard/engines/protos/portion_info.pb.h>
 
 #include <ydb/core/tx/columnshard/blob.h>
 #include <ydb/core/tx/columnshard/common/snapshot.h>
@@ -165,6 +165,7 @@ public:
     TString DebugString() const {
         return TStringBuilder()
             << "column_id:" << ColumnId << ";"
+            << "chunk_idx:" << Chunk << ";"
             << "blob_range:" << BlobRange.ToString() << ";"
             ;
     }

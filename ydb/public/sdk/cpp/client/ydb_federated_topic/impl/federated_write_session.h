@@ -2,8 +2,6 @@
 
 #include <ydb/public/sdk/cpp/client/ydb_federated_topic/impl/federated_topic_impl.h>
 
-#include <ydb/public/sdk/cpp/client/ydb_persqueue_public/impl/write_session.h>
-
 #include <ydb/public/sdk/cpp/client/ydb_topic/impl/write_session.h>
 
 #include <deque>
@@ -65,6 +63,7 @@ private:
     };
 
     struct TDeferredWrite {
+        TDeferredWrite() {}
         explicit TDeferredWrite(std::shared_ptr<NTopic::IWriteSession> writer)
             : Writer(std::move(writer)) {
         }
@@ -124,7 +123,9 @@ private:
 
     TAdaptiveLock Lock;
 
+    size_t SubsessionGeneration = 0;
     std::shared_ptr<NTopic::IWriteSession> Subsession;
+    std::shared_ptr<NTopic::IWriteSession> OldSubsession;
 
     std::shared_ptr<NTopic::TWriteSessionEventsQueue> ClientEventsQueue;
 

@@ -1,10 +1,12 @@
-#include "columnshard_ut_common.h"
+#include <ydb/core/tx/columnshard/test_helper/columnshard_ut_common.h>
 
 #include <ydb/core/tx/columnshard/hooks/abstract/abstract.h>
 #include <ydb/core/tx/columnshard/hooks/testing/controller.h>
 #include <ydb/core/tx/columnshard/test_helper/controllers.h>
 
+#include <ydb/core/tx/columnshard/columnshard.h>
 #include <ydb/core/tx/columnshard/operations/write_data.h>
+#include <ydb/core/tx/tx_processing.h>
 #include <ydb/core/wrappers/fake_storage.h>
 
 
@@ -99,13 +101,12 @@ Y_UNIT_TEST_SUITE(Backup) {
         txBody.MutableBackupTask()->SetSnapshotTxId(backupSnapshot.GetTxId());
         txBody.MutableBackupTask()->MutableS3Settings()->SetEndpoint("fake");
         txBody.MutableBackupTask()->MutableS3Settings()->SetSecretKey("fakeSecret");
-        UNIT_ASSERT(ProposeTx(runtime, sender, NKikimrTxColumnShard::TX_KIND_BACKUP, txBody.SerializeAsString(), ++txId));
         AFL_VERIFY(csControllerGuard->GetFinishedExportsCount() == 0);
-        PlanTx(runtime, sender, NKikimrTxColumnShard::TX_KIND_BACKUP, NOlap::TSnapshot(++planStep, txId));
+        UNIT_ASSERT(ProposeTx(runtime, sender, NKikimrTxColumnShard::TX_KIND_BACKUP, txBody.SerializeAsString(), ++txId));
+        AFL_VERIFY(csControllerGuard->GetFinishedExportsCount() == 1);
+        PlanTx(runtime, sender, NKikimrTxColumnShard::TX_KIND_BACKUP, NOlap::TSnapshot(++planStep, txId), false);
         TestWaitCondition(runtime, "export",
             []() {return Singleton<NKikimr::NWrappers::NExternalStorage::TFakeExternalStorage>()->GetSize(); });
-        TestWaitCondition(runtime, "finish",
-            [&]() {return csControllerGuard->GetFinishedExportsCount() == 1; });
     }
 }
 

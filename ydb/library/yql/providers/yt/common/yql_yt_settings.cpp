@@ -2,6 +2,7 @@
 
 #include <ydb/library/yql/providers/common/codec/yql_codec_type_flags.h>
 #include <ydb/library/yql/utils/log/log.h>
+#include <ydb/library/yql/public/udf/udf_data_type.h>
 
 #include <library/cpp/yson/node/node_io.h>
 
@@ -148,7 +149,11 @@ TYtConfiguration::TYtConfiguration()
     REGISTER_SETTING(*this, UseTmpfs);
     REGISTER_SETTING(*this, SuspendIfAccountLimitExceeded);
     REGISTER_SETTING(*this, ExtraTmpfsSize);
-    REGISTER_SETTING(*this, OptimizeFor).Parser([](const TString& v) { return FromString<NYT::EOptimizeForAttr>(v); });
+    REGISTER_SETTING(*this, OptimizeFor)
+        .Parser([](const TString& v) {
+            return FromString<NYT::EOptimizeForAttr>(v);
+        });
+
     REGISTER_SETTING(*this, DefaultCluster)
         .Validator([this] (const TString&, TString value) {
             if (!ValidClusters.contains(value)) {
@@ -309,11 +314,12 @@ TYtConfiguration::TYtConfiguration()
     REGISTER_SETTING(*this, MapJoinUseFlow);
     REGISTER_SETTING(*this, EvaluationTableSizeLimit).Upper(10_MB); // Max 10Mb
     REGISTER_SETTING(*this, LookupJoinLimit).Upper(10_MB); // Same as EvaluationTableSizeLimit
-    REGISTER_SETTING(*this, LookupJoinMaxRows).Upper(1000);
+    REGISTER_SETTING(*this, LookupJoinMaxRows).Upper(10000);
     REGISTER_SETTING(*this, DisableOptimizers);
     REGISTER_SETTING(*this, MaxInputTables).Lower(2).Upper(3000); // 3000 - default max limit on YT clusters
     REGISTER_SETTING(*this, MaxOutputTables).Lower(1).Upper(100); // https://ml.yandex-team.ru/thread/yt/166633186212752141/
     REGISTER_SETTING(*this, MaxInputTablesForSortedMerge).Lower(2).Upper(1000); // https://st.yandex-team.ru/YTADMINREQ-16742
+    REGISTER_SETTING(*this, DisableFuseOperations);
     REGISTER_SETTING(*this, MaxExtraJobMemoryToFuseOperations);
     REGISTER_SETTING(*this, MaxReplicationFactorToFuseOperations).Lower(1.0);
     REGISTER_SETTING(*this, MaxOperationFiles).Lower(2).Upper(1000);
@@ -442,7 +448,7 @@ TYtConfiguration::TYtConfiguration()
     REGISTER_SETTING(*this, DqPruneKeyFilterLambda);
     REGISTER_SETTING(*this, MergeAdjacentPointRanges);
     REGISTER_SETTING(*this, KeyFilterForStartsWith);
-    REGISTER_SETTING(*this, MaxKeyRangeCount).Upper(1000);
+    REGISTER_SETTING(*this, MaxKeyRangeCount).Upper(10000);
     REGISTER_SETTING(*this, MaxChunksForDqRead).Lower(1);
     REGISTER_SETTING(*this, NetworkProject);
     REGISTER_SETTING(*this, FileCacheTtl);
@@ -460,6 +466,17 @@ TYtConfiguration::TYtConfiguration()
     REGISTER_SETTING(*this, UseRPCReaderInDQ);
     REGISTER_SETTING(*this, DQRPCReaderInflight).Lower(1);
     REGISTER_SETTING(*this, DQRPCReaderTimeout);
+    REGISTER_SETTING(*this, BlockReaderSupportedTypes);
+    REGISTER_SETTING(*this, BlockReaderSupportedDataTypes)
+        .Parser([](const TString& v) {
+            TSet<TString> vec;
+            StringSplitter(v).SplitBySet(",").AddTo(&vec);
+            TSet<NUdf::EDataSlot> res;
+            for (auto& s: vec) {
+                res.emplace(NUdf::GetDataSlot(s));
+            }
+            return res;
+        });
     REGISTER_SETTING(*this, MaxCpuUsageToFuseMultiOuts).Lower(1.0);
     REGISTER_SETTING(*this, MaxReplicationFactorToFuseMultiOuts).Lower(1.0);
     REGISTER_SETTING(*this, ApplyStoredConstraints)
@@ -477,6 +494,12 @@ TYtConfiguration::TYtConfiguration()
         });
     REGISTER_SETTING(*this, ViewIsolation);
     REGISTER_SETTING(*this, PartitionByConstantKeysViaMap);
+    REGISTER_SETTING(*this, ColumnGroupMode)
+        .Parser([](const TString& v) {
+            return FromString<EColumnGroupMode>(v);
+        });
+    REGISTER_SETTING(*this, MinColumnGroupSize).Lower(2);
+    REGISTER_SETTING(*this, MaxColumnGroups);
 }
 
 EReleaseTempDataMode GetReleaseTempDataMode(const TYtSettings& settings) {

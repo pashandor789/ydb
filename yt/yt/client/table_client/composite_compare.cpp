@@ -1,6 +1,7 @@
 #include "composite_compare.h"
 
 #include <yt/yt/client/table_client/row_base.h>
+
 #include <yt/yt/core/yson/pull_parser.h>
 #include <yt/yt/core/yson/token_writer.h>
 
@@ -11,13 +12,15 @@
 
 #include <util/stream/mem.h>
 
+#include <cmath>
+
 namespace NYT::NTableClient {
 
 using namespace NYson;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static const auto Logger = NLogging::TLogger{"YsonCompositeCompare"};
+YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "YsonCompositeCompare");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -30,7 +33,7 @@ namespace {
 //   3. Tuple
 //   4. Variant
 //
-// When we compare composite or any values we assume that they are well-formed yson representations of same type supporting comparison.
+// When we compare composite or any values we assume that they are well-formed YSON representations of same type supporting comparison.
 // And we compare them in following manner:
 //   1. We scan two values simultaneously and look at their yson tokens and find first mismatching token.
 //   2. If one of the token is EndList (this only can happen if we parsing values of list type
@@ -212,7 +215,7 @@ i64 GetMinResultingSize(const TYsonItem& item, bool isInsideList)
 
 } // namespace
 
-int CompareCompositeValues(TYsonStringBuf lhs, TYsonStringBuf rhs)
+int CompareYsonValues(TYsonStringBuf lhs, TYsonStringBuf rhs)
 {
     YT_ASSERT(lhs.GetType() == EYsonType::Node);
     YT_ASSERT(rhs.GetType() == EYsonType::Node);

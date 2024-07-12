@@ -12,14 +12,17 @@ ELSE()
 ENDIF()
 
 SRCS(
+    acceleration.cpp
     assimilation.cpp
     block_race.cpp
     counting_events.cpp
     decommit_3dc.cpp
     defrag.cpp
     discover.cpp
+    ds_proxy_lwtrace.cpp
     encryption.cpp
     extra_block_checks.cpp
+    gc.cpp
     gc_quorum_3dc.cpp
     get.cpp
     group_reconfiguration.cpp

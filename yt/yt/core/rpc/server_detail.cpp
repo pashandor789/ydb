@@ -12,6 +12,8 @@
 
 #include <yt/yt/core/misc/protobuf_helpers.h>
 
+#include <yt/yt/core/ytree/ypath_client.h>
+
 namespace NYT::NRpc {
 
 using namespace NConcurrency;
@@ -132,7 +134,7 @@ void TServiceContextBase::ReplyEpilogue()
         LoggingEnabled_ &&
         TDispatcher::Get()->ShouldAlertOnMissingRequestInfo())
     {
-        static const auto& Logger = RpcServerLogger;
+        static constexpr auto& Logger = RpcServerLogger;
         YT_LOG_ALERT("Missing request info (RequestId: %v, Method: %v.%v)",
             RequestId_,
             RequestHeader_->service(),
@@ -918,7 +920,13 @@ void TServerBase::ApplyConfig()
     newAppliedConfig->Services = StaticConfig_->Services;
 
     for (const auto& [name, node] : DynamicConfig_->Services) {
-        newAppliedConfig->Services[name] = node;
+        auto it = newAppliedConfig->Services.find(name);
+        if (it != newAppliedConfig->Services.end()) {
+            const auto& [_, staticConfigNode] = *it;
+            newAppliedConfig->Services[name] = NYTree::PatchNode(staticConfigNode, node);
+        } else {
+            newAppliedConfig->Services[name] = node;
+        }
     }
 
     AppliedConfig_ = newAppliedConfig;
@@ -973,7 +981,7 @@ TFuture<void> TServerBase::Stop(bool graceful)
     YT_LOG_INFO("Stopping RPC server (Graceful: %v)",
         graceful);
 
-    return DoStop(graceful).Apply(BIND([this, this_ = MakeStrong(this)] () {
+    return DoStop(graceful).Apply(BIND([this, this_ = MakeStrong(this)] {
         YT_LOG_INFO("RPC server stopped");
     }));
 }

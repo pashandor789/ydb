@@ -794,7 +794,6 @@ public:
                 mode = FromString<EYtWriteMode>(modeSetting->Child(1)->Content());
             }
             const bool initial = NYql::HasSetting(publish.Settings().Ref(), EYtSettingType::Initial);
-            const bool monotonicKeys = NYql::HasSetting(publish.Settings().Ref(), EYtSettingType::MonotonicKeys);
 
             std::unordered_map<EYtSettingType, TString> strOpts;
             for (const auto& setting : publish.Settings().Ref().Children()) {
@@ -815,9 +814,15 @@ public:
             TVector<TString> src;
             ui64 chunksCount = 0;
             ui64 dataSize = 0;
+            std::unordered_set<TString> columnGroups;
             for (auto out: publish.Input()) {
                 auto outTable = GetOutTable(out).Cast<TYtOutTable>();
                 src.emplace_back(outTable.Name().Value());
+                if (auto columnGroupSetting = NYql::GetSetting(outTable.Settings().Ref(), EYtSettingType::ColumnGroups)) {
+                    columnGroups.emplace(columnGroupSetting->Tail().Content());
+                } else {
+                    columnGroups.emplace();
+                }
                 auto stat = TYtTableStatInfo(outTable.Stat());
                 chunksCount += stat.ChunkCount;
                 dataSize += stat.DataSize;
@@ -828,6 +833,7 @@ public:
             if (src.size() > 10) {
                 YQL_CLOG(INFO, ProviderYt) << "...total input tables=" << src.size();
             }
+            TString srcColumnGroups = columnGroups.size() == 1 ? *columnGroups.cbegin() : TString();
 
             bool combineChunks = false;
             if (auto minChunkSize = options.Config()->MinPublishedAvgChunkSize.Get()) {
@@ -858,9 +864,9 @@ public:
             const ui32 dstEpoch = TEpochInfo::Parse(publish.Publish().Epoch().Ref()).GetOrElse(0);
             auto execCtx = MakeExecCtx(std::move(options), session, cluster, node.Get(), &ctx);
 
-            return session->Queue_->Async([execCtx, src = std::move(src), dst, dstEpoch, isAnonymous, mode, initial, monotonicKeys, combineChunks, strOpts = std::move(strOpts)] () {
+            return session->Queue_->Async([execCtx, src = std::move(src), dst, dstEpoch, isAnonymous, mode, initial, srcColumnGroups, combineChunks, strOpts = std::move(strOpts)] () {
                 YQL_LOG_CTX_ROOT_SESSION_SCOPE(execCtx->LogCtx_);
-                return ExecPublish(execCtx, src, dst, dstEpoch, isAnonymous, mode, initial, monotonicKeys, combineChunks, strOpts);
+                return ExecPublish(execCtx, src, dst, dstEpoch, isAnonymous, mode, initial, srcColumnGroups, combineChunks, strOpts);
             })
             .Apply([nodePos] (const TFuture<void>& f) {
                 try {
@@ -1756,7 +1762,6 @@ private:
         auto pos = execCtx->Options_.Pos();
         try {
             auto entry = execCtx->GetOrCreateEntry();
-            auto deterministicMode = execCtx->Session_->DeterministicMode_;
 
             TString prefix = execCtx->Options_.Prefix();
             TString suffix = execCtx->Options_.Suffix();
@@ -1765,7 +1770,7 @@ private:
             with_lock(entry->Lock_) {
                 if (auto p = entry->RangeCache.FindPtr(cacheKey)) {
                     YQL_CLOG(INFO, ProviderYt) << "Found range in cache for key ('" << prefix << "','" << suffix << "',<filter with size " << filterLambda.Size() << ">) - number of items " << p->size();
-                    return MakeFuture(MakeTableRangeResult(*p, deterministicMode));
+                    return MakeFuture(MakeTableRangeResult(*p));
                 }
             }
 
@@ -1890,7 +1895,7 @@ private:
 
                 auto logCtx = execCtx->LogCtx_;
                 return ExecCalc(filterLambda, extraUsage, tmpTablePath, execCtx, entry, TNodeResultFactory())
-                    .Apply([logCtx, prefix, suffix, entry, deterministicMode, pos, errors = std::move(errors), cacheKey = std::move(cacheKey)](const TFuture<NYT::TNode>& f) mutable {
+                    .Apply([logCtx, prefix, suffix, entry, pos, errors = std::move(errors), cacheKey = std::move(cacheKey)](const TFuture<NYT::TNode>& f) mutable {
                         YQL_LOG_CTX_ROOT_SESSION_SCOPE(logCtx);
                         std::vector<TString> names;
                         try {
@@ -1903,20 +1908,20 @@ private:
                                 }
                                 names.push_back(n.AsList().at(0).AsString());
                             }
-                            return MakeTableRangeResult(std::move(names), std::move(cacheKey), prefix, suffix, entry, deterministicMode);
+                            return MakeTableRangeResult(std::move(names), std::move(cacheKey), prefix, suffix, entry);
                         } catch (...) {
                             return ResultFromCurrentException<TTableRangeResult>(pos);
                         }
                     });
             }
-            return MakeFuture(MakeTableRangeResult(std::move(names), std::move(cacheKey), prefix, suffix, entry, deterministicMode));
+            return MakeFuture(MakeTableRangeResult(std::move(names), std::move(cacheKey), prefix, suffix, entry));
 
         } catch (...) {
             return MakeFuture(ResultFromCurrentException<TTableRangeResult>(pos));
         }
     }
 
-    static TTableRangeResult MakeTableRangeResult(const std::vector<NYT::TRichYPath>& paths, bool deterministicMode) {
+    static TTableRangeResult MakeTableRangeResult(const std::vector<NYT::TRichYPath>& paths) {
         TTableRangeResult rangeRes;
         rangeRes.SetSuccess();
 
@@ -1929,14 +1934,14 @@ private:
             canonPath.Ranges = normalizedPath.GetRanges();
             rangeRes.Tables.push_back(std::move(canonPath));
         }
-        if (deterministicMode) {
-            SortBy(rangeRes.Tables, [] (const TCanonizedPath& path) { return path.Path; });
-        }
+
+        SortBy(rangeRes.Tables, [] (const TCanonizedPath& path) { return path.Path; });
+
         return rangeRes;
     }
 
     static TTableRangeResult MakeTableRangeResult(std::vector<TString>&& names, std::tuple<TString, TString, TString>&& cacheKey,
-        TString prefix, TString suffix, const TTransactionCache::TEntry::TPtr& entry, bool deterministicMode)
+        TString prefix, TString suffix, const TTransactionCache::TEntry::TPtr& entry)
     {
         TTableRangeResult rangeRes;
         rangeRes.SetSuccess();
@@ -1996,9 +2001,8 @@ private:
             entry->RangeCache.emplace(std::move(cacheKey), std::move(cached));
         }
 
-        if (deterministicMode) {
-            SortBy(rangeRes.Tables, [] (const TCanonizedPath& path) { return path.Path; });
-        }
+        SortBy(rangeRes.Tables, [] (const TCanonizedPath& path) { return path.Path; });
+
         return rangeRes;
     }
 
@@ -2010,7 +2014,7 @@ private:
         const bool isAnonymous,
         EYtWriteMode mode,
         const bool initial,
-        const bool monotonicKeys,
+        const TString& srcColumnGroups,
         const bool combineChunks,
         const std::unordered_map<EYtSettingType, TString>& strOpts)
     {
@@ -2062,7 +2066,7 @@ private:
         TYqlRowSpecInfo::TPtr rowSpec = execCtx->Options_.DestinationRowSpec();
 
         bool appendToSorted = false;
-        if (EYtWriteMode::Append == mode && !monotonicKeys) {
+        if (EYtWriteMode::Append == mode && !strOpts.contains(EYtSettingType::MonotonicKeys)) {
             NYT::TNode attrs = entry->Tx->Get(dstPath + "/@", TGetOptions()
                 .AttributeFilter(TAttributeFilter()
                     .AddAttribute(TString("sorted_by"))
@@ -2071,8 +2075,9 @@ private:
             appendToSorted = attrs.HasKey("sorted_by") && !attrs["sorted_by"].AsList().empty();
         }
 
-        NYT::TNode storageAttrs = NYT::TNode::CreateMap();
         auto yqlAttrs = NYT::TNode::CreateMap();
+
+        auto storageAttrs = NYT::TNode::CreateMap();
         if (appendToSorted || EYtWriteMode::RenewKeepMeta == mode) {
             yqlAttrs = GetUserAttributes(entry->Tx, dstPath, false);
             storageAttrs = entry->Tx->Get(dstPath + "/@", TGetOptions()
@@ -2086,8 +2091,30 @@ private:
             );
         }
 
+        bool forceMerge = combineChunks;
+
         NYT::MergeNodes(yqlAttrs, GetUserAttributes(entry->Tx, srcPaths.back(), true));
         NYT::MergeNodes(yqlAttrs, YqlOpOptionsToAttrs(execCtx->Session_->OperationOptions_));
+        if (EYtWriteMode::RenewKeepMeta == mode) {
+            auto dstAttrs = entry->Tx->Get(dstPath + "/@", TGetOptions()
+                .AttributeFilter(TAttributeFilter()
+                    .AddAttribute("annotation")
+                    .AddAttribute("expiration_time")
+                    .AddAttribute("expiration_timeout")
+                    .AddAttribute("tablet_cell_bundle")
+                    .AddAttribute("enable_dynamic_store_read")
+                )
+            );
+            if (dstAttrs.AsMap().contains("tablet_cell_bundle") && dstAttrs["tablet_cell_bundle"] != "default") {
+                forceMerge = true;
+            }
+            dstAttrs.AsMap().erase("tablet_cell_bundle");
+            if (dstAttrs.AsMap().contains("enable_dynamic_store_read")) {
+                forceMerge = true;
+            }
+            dstAttrs.AsMap().erase("enable_dynamic_store_read");
+            NYT::MergeNodes(yqlAttrs, dstAttrs);
+        }
         NYT::TNode& rowSpecNode = yqlAttrs[YqlRowSpecAttribute];
         const auto nativeYtTypeCompatibility = execCtx->Options_.Config()->NativeYtTypeCompatibility.Get(cluster).GetOrElse(NTCF_LEGACY);
         const bool rowSpecCompactForm = execCtx->Options_.Config()->UseYqlRowSpecCompactForm.Get().GetOrElse(DEFAULT_ROW_SPEC_COMPACT_FORM);
@@ -2102,7 +2129,7 @@ private:
             }
         };
 
-        if (EYtWriteMode::Renew == mode) {
+        if (EYtWriteMode::Renew == mode || EYtWriteMode::RenewKeepMeta == mode) {
             const auto expirationIt = strOpts.find(EYtSettingType::Expiration);
             bool isTimestamp = false, isDuration = false;
             TInstant stamp;
@@ -2139,7 +2166,6 @@ private:
             }
         }
 
-        bool forceMerge = combineChunks;
         bool forceTransform = false;
 
 #define DEFINE_OPT(name, attr, transform)                                                               \
@@ -2167,6 +2193,14 @@ private:
 
 #undef DEFINE_OPT
 
+        NYT::TNode columnGroupsSpec;
+        if (const auto it = strOpts.find(EYtSettingType::ColumnGroups); it != strOpts.cend() && execCtx->Options_.Config()->OptimizeFor.Get(cluster).GetOrElse(NYT::OF_LOOKUP_ATTR) != NYT::OF_LOOKUP_ATTR) {
+            columnGroupsSpec = NYT::NodeFromYsonString(it->second);
+            if (it->second != srcColumnGroups) {
+                forceMerge = forceTransform = true;
+            }
+        }
+
         TFuture<void> res;
         if (EYtWriteMode::Flush == mode || EYtWriteMode::Append == mode || srcPaths.size() > 1 || forceMerge) {
             TFuture<bool> cacheCheck = MakeFuture<bool>(false);
@@ -2178,7 +2212,7 @@ private:
                                     appendToSorted, initial, entry, dstPath, dstEpoch, yqlAttrs, combineChunks,
                                     dstCompressionCodec, dstErasureCodec, dstReplicationFactor, dstMedia, dstPrimaryMedium,
                                     nativeYtTypeCompatibility, publishTx, cluster,
-                                    commitCheckpoint] (const auto& f) mutable
+                                    commitCheckpoint, columnGroupsSpec = std::move(columnGroupsSpec)] (const auto& f) mutable
             {
                 if (f.GetValue()) {
                     execCtx->QueryCacheItem.Destroy();
@@ -2217,7 +2251,7 @@ private:
                 } else {
                     NYT::TNode fullSpecYson;
                     rowSpec->FillCodecNode(fullSpecYson);
-                    const auto schema = RowSpecToYTSchema(fullSpecYson, nativeYtTypeCompatibility);
+                    const auto schema = RowSpecToYTSchema(fullSpecYson, nativeYtTypeCompatibility, columnGroupsSpec);
                     ytDst.Schema(schema);
 
                     if (EYtWriteMode::Append != mode && EYtWriteMode::RenewKeepMeta != mode) {
@@ -4969,11 +5003,11 @@ private:
 
     template <class TExecParamsPtr>
     static void PrepareAttributes(
-            NYT::TNode& attrs,
-            const TOutputInfo& out,
-            const TExecParamsPtr& execCtx,
-            const TString& cluster,
-            bool createTable)
+        NYT::TNode& attrs,
+        const TOutputInfo& out,
+        const TExecParamsPtr& execCtx,
+        const TString& cluster,
+        bool createTable)
     {
         PrepareCommonAttributes<TExecParamsPtr>(attrs, execCtx, cluster, createTable);
 
@@ -4981,7 +5015,7 @@ private:
 
         if (createTable) {
             const auto nativeTypeCompat = execCtx->Options_.Config()->NativeYtTypeCompatibility.Get(cluster).GetOrElse(NTCF_LEGACY);
-            attrs["schema"] = RowSpecToYTSchema(out.Spec[YqlRowSpecAttribute], nativeTypeCompat).ToNode();
+            attrs["schema"] = RowSpecToYTSchema(out.Spec[YqlRowSpecAttribute], nativeTypeCompat, out.ColumnGroups).ToNode();
         }
     }
 

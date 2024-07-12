@@ -1,8 +1,11 @@
 #include "constructor.h"
+
 #include <ydb/core/tx/columnshard/columnshard_schema.h>
+#include <ydb/core/tx/columnshard/common/limits.h>
 #include <ydb/core/tx/columnshard/engines/scheme/index_info.h>
 #include <ydb/core/tx/columnshard/engines/scheme/versions/abstract_scheme.h>
 #include <ydb/core/tx/columnshard/engines/scheme/versions/versioned_index.h>
+#include <ydb/core/tx/columnshard/hooks/abstract/abstract.h>
 
 namespace NKikimr::NOlap {
 
@@ -20,10 +23,12 @@ TPortionInfo TPortionInfoConstructor::Build(const bool needChunksNormalization) 
         result.RemoveSnapshot = *RemoveSnapshot;
     }
     result.SchemaVersion = SchemaVersion;
+    result.ShardingVersion = ShardingVersion;
 
     if (needChunksNormalization) {
         ReorderChunks();
     }
+    NActors::TLogContextGuard lGuard = NActors::TLogContextBuilder::Build()("portion_id", GetPortionIdVerified());
     FullValidation();
 
     result.Indexes = Indexes;
@@ -80,8 +85,8 @@ const NKikimr::NOlap::TColumnRecord& TPortionInfoConstructor::AppendOneChunkColu
 
 void TPortionInfoConstructor::AddMetadata(const ISnapshotSchema& snapshotSchema, const std::shared_ptr<arrow::RecordBatch>& batch) {
     Y_ABORT_UNLESS(batch->num_rows() == GetRecordsCount());
-    MetaConstructor.FillMetaInfo(NArrow::TFirstLastSpecialKeys(batch),
+    MetaConstructor.FillMetaInfo(NArrow::TFirstLastSpecialKeys(batch), IIndexInfo::CalcDeletions(batch, false),
         NArrow::TMinMaxSpecialKeys(batch, TIndexInfo::ArrowSchemaSnapshot()), snapshotSchema.GetIndexInfo());
 }
 
-}
+}   // namespace NKikimr::NOlap

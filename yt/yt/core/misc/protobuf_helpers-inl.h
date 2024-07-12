@@ -37,6 +37,10 @@ DEFINE_TRIVIAL_PROTO_CONVERSIONS(bool)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+#define YT_PROTO_OPTIONAL_CONVERT(...) __VA_OPT__(::NYT::FromProto<__VA_ARGS__>)
+
+////////////////////////////////////////////////////////////////////////////////
+
 // These conversions work in case if the patched protobuf that uses
 // TString is used.
 inline void ToProto(TString* serialized, TString original)
@@ -568,28 +572,6 @@ i64 TRefCountedProto<TProto>::GetSize() const
 
 ////////////////////////////////////////////////////////////////////////////////
 
-// RepeatedField formatter
-template <class T>
-struct TValueFormatter<::google::protobuf::RepeatedField<T>>
-{
-    static void Do(TStringBuilderBase* builder, const ::google::protobuf::RepeatedField<T>& collection, TStringBuf /*format*/)
-    {
-        FormatRange(builder, collection, TDefaultFormatter());
-    }
-};
-
-// RepeatedPtrField formatter
-template <class T>
-struct TValueFormatter<::google::protobuf::RepeatedPtrField<T>>
-{
-    static void Do(TStringBuilderBase* builder, const ::google::protobuf::RepeatedPtrField<T>& collection, TStringBuf /*format*/)
-    {
-        FormatRange(builder, collection, TDefaultFormatter());
-    }
-};
-
-////////////////////////////////////////////////////////////////////////////////
-
 template <class TSerialized, class T, class TTag>
 void FromProto(TStrongTypedef<T, TTag>* original, const TSerialized& serialized)
 {
@@ -604,4 +586,38 @@ void ToProto(TSerialized* serialized, const TStrongTypedef<T, TTag>& original)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+template <std::derived_from<::google::protobuf::MessageLite> T>
+void FormatValue(TStringBuilderBase* builder, const T& message, TStringBuf spec)
+{
+    FormatValue(builder, NYT::ToStringIgnoringFormatValue(message), spec);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 } // namespace NYT
+
+namespace google::protobuf {
+
+////////////////////////////////////////////////////////////////////////////////
+
+template <class T>
+void FormatValue(
+    NYT::TStringBuilderBase* builder,
+    const ::google::protobuf::RepeatedField<T>& collection,
+    TStringBuf /*spec*/)
+{
+    NYT::FormatRange(builder, collection, NYT::TDefaultFormatter());
+}
+
+template <class T>
+void FormatValue(
+    NYT::TStringBuilderBase* builder,
+    const ::google::protobuf::RepeatedPtrField<T>& collection,
+    TStringBuf /*spec*/)
+{
+    NYT::FormatRange(builder, collection, NYT::TDefaultFormatter());
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+} // namespace google::protobuf

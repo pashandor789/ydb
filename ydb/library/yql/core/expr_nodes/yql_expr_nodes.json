@@ -31,6 +31,10 @@
             ]
         },
         {
+            "Name": "TCoNameValueTupleList",
+            "ListBase": "TCoNameValueTuple"
+        },
+        {
             "Name": "TCoIndex",
             "Base": "TExprBase",
             "Match": {"Type": "Tuple"},
@@ -38,16 +42,13 @@
                 {"Index": 0, "Name": "Name", "Type": "TCoAtom"},
                 {"Index": 1, "Name": "Type", "Type": "TCoAtom"},
                 {"Index": 2, "Name": "Columns", "Type": "TCoAtomList"},
-                {"Index": 3, "Name": "DataColumns", "Type": "TCoAtomList"}
+                {"Index": 3, "Name": "DataColumns", "Type": "TCoAtomList"},
+                {"Index": 4, "Name": "TableSettings", "Type": "TCoNameValueTupleList", "Optional": true}
             ]
         },
         {
             "Name": "TCoIndexList",
             "ListBase": "TCoIndex"
-        },
-        {
-            "Name": "TCoNameValueTupleList",
-            "ListBase": "TCoNameValueTuple"
         },
         {
             "Name": "TCoChangefeed",
@@ -1032,6 +1033,21 @@
             "Name": "TCoInterval",
             "Base": "TCoDataCtor",
             "Match": {"Type": "Callable", "Name": "Interval"}
+        },
+        {
+            "Name": "TCoTzDate32",
+            "Base": "TCoTzDateBase",
+            "Match": {"Type": "Callable", "Name": "TzDate32"}
+        },
+        {
+            "Name": "TCoTzDatetime64",
+            "Base": "TCoTzDateBase",
+            "Match": {"Type": "Callable", "Name": "TzDatetime64"}
+        },
+        {
+            "Name": "TCoTzTimestamp64",
+            "Base": "TCoTzDateBase",
+            "Match": {"Type": "Callable", "Name": "TzTimestamp64"}
         },
         {
             "Name": "TCoInterval64",
@@ -2547,6 +2563,27 @@
             "Base": "TCallable",
             "Match": {"Type": "Callable", "Name": "ReturningStar"},
             "Children": []
+        },
+        {
+            "Name": "TCoReplicationTarget",
+            "Base": "TExprBase",
+            "Match": {"Type": "Tuple"},
+            "Children": [
+                {"Index": 0, "Name": "RemotePath", "Type": "TCoAtom"},
+                {"Index": 1, "Name": "LocalPath", "Type": "TCoAtom"}
+            ]
+        },
+        {
+            "Name": "TCoReplicationTargetList",
+            "ListBase": "TCoReplicationTarget"
+        },
+        {
+            "Name" : "TCoLikely",
+            "Base" : "TCallable",
+            "Match": {"Type": "Callable", "Name": "Likely"},
+            "Children": [
+                {"Index": 0, "Name": "Predicate", "Type": "TExprBase"}
+            ]
         }
     ]
 }

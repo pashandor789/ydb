@@ -11,14 +11,14 @@ items:
   include:
     mode: link
     path: devops/toc_p.yaml
-- name: For DBA
-  include:
-    mode: link
-    path: dba/toc_p.yaml
 - name: For Developers
   include:
     mode: link
     path: dev/toc_p.yaml
+- name: For Security Engineers
+  include:
+    mode: link
+    path: security/toc_p.yaml
 - name: For Contributors
   include:
     mode: link
@@ -27,16 +27,22 @@ items:
   include:
     mode: link
     path: reference/toc_p.yaml
+- name: Recipes
+  include:
+    mode: link
+    path: recipes/toc_p.yaml
 - name: Questions and answers
   include:
     mode: link
     path: faq/toc_p.yaml
+- name: Public materials
+  include:
+    mode: link
+    path: public-materials/toc_p.yaml
 - name: Downloads
   include:
     mode: link
     path: downloads/toc_p.yaml
-- name: Public talks
-  href: public-talks.md
 - name: Changelog
   include:
     mode: link

@@ -1,11 +1,5 @@
 LIBRARY()
 
-OWNER(
-    alexnick
-    g:kikimr
-    g:logbroker
-)
-
 SRCS(
     actor_persqueue_client_iface.h
     blob.cpp
@@ -14,10 +8,12 @@ SRCS(
     fetch_request_actor.cpp
     header.cpp
     heartbeat.cpp
+    key.cpp
     metering_sink.cpp
     mirrorer.cpp
     mirrorer.h
     ownerinfo.cpp
+    offload_actor.cpp
     partition_init.cpp
     partition_monitoring.cpp
     partition_read.cpp
@@ -33,7 +29,7 @@ SRCS(
     pq_l2_cache.cpp
     pq_rl_helpers.cpp
     quota_tracker.cpp
-    read_balancer__types.cpp
+    read_balancer__balancing.cpp
     read_balancer.cpp
     account_read_quoter.cpp
     read_quoter.cpp
@@ -47,14 +43,17 @@ SRCS(
     write_quoter.cpp
     microseconds_sliding_window.cpp
     dread_cache_service/caching_service.cpp
+    write_id.cpp
 )
 
+GENERATE_ENUM_SERIALIZATION(read_balancer__balancing.h)
 GENERATE_ENUM_SERIALIZATION(sourceid_info.h)
 
 PEERDIR(
     ydb/library/actors/core
     library/cpp/html/pcdata
     library/cpp/json
+    ydb/core/backup/impl
     ydb/core/base
     ydb/core/engine/minikql
     ydb/core/keyvalue
@@ -80,4 +79,5 @@ RECURSE_FOR_TESTS(
     ut
     dread_cache_service/ut
     ut/slow
+    ut/ut_with_sdk
 )

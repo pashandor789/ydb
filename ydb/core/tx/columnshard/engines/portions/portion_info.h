@@ -101,6 +101,7 @@ public:
 };
 
 class TPortionInfoConstructor;
+class TGranuleShardingInfo;
 
 class TPortionInfo {
 public:
@@ -120,6 +121,7 @@ private:
     TSnapshot MinSnapshotDeprecated = TSnapshot::Zero();  // {PlanStep, TxId} is min snapshot for {Granule, Portion}
     TSnapshot RemoveSnapshot = TSnapshot::Zero(); // {XPlanStep, XTxId} is snapshot where the blob has been removed (i.e. compacted into another one)
     std::optional<ui64> SchemaVersion;
+    std::optional<ui64> ShardingVersion;
 
     TPortionMeta Meta;
     YDB_READONLY_DEF(std::vector<TIndexChunk>, Indexes);
@@ -171,6 +173,20 @@ private:
     }
 public:
     ui64 GetMinMemoryForReadColumns(const std::optional<std::set<ui32>>& columnIds) const;
+
+    bool NeedShardingFilter(const TGranuleShardingInfo& shardingInfo) const;
+
+    const std::optional<ui64>& GetShardingVersionOptional() const {
+        return ShardingVersion;
+    }
+
+    bool CrossSSWith(const TPortionInfo& p) const {
+        return std::min(RecordSnapshotMax(), p.RecordSnapshotMax()) <= std::max(RecordSnapshotMin(), p.RecordSnapshotMin());
+    }
+
+    ui64 GetShardingVersionDef(const ui64 verDefault) const {
+        return ShardingVersion.value_or(verDefault);
+    }
 
     void SetRemoveSnapshot(const TSnapshot& snap) {
         AFL_VERIFY(!RemoveSnapshot.Valid());
@@ -438,6 +454,10 @@ public:
         return TPortionAddress(PathId, Portion);
     }
 
+    void ResetShardingVersion() {
+        ShardingVersion.reset();
+    }
+
     void SetPathId(const ui64 pathId) {
         PathId = pathId;
     }
@@ -593,7 +613,8 @@ public:
     class TAssembleBlobInfo {
     private:
         YDB_READONLY_DEF(std::optional<ui32>, ExpectedRowsCount);
-        ui32 NullRowsCount = 0;
+        ui32 DefaultRowsCount = 0;
+        std::shared_ptr<arrow::Scalar> DefaultValue;
         TString Data;
     public:
         ui32 GetExpectedRowsCountVerified() const {
@@ -605,13 +626,15 @@ public:
             AFL_VERIFY(!ExpectedRowsCount);
             ExpectedRowsCount = expectedRowsCount;
             if (!Data) {
-                AFL_VERIFY(*ExpectedRowsCount == NullRowsCount);
+                AFL_VERIFY(*ExpectedRowsCount == DefaultRowsCount);
             }
         }
 
-        TAssembleBlobInfo(const ui32 rowsCount)
-            : NullRowsCount(rowsCount) {
-            AFL_VERIFY(NullRowsCount);
+        TAssembleBlobInfo(const ui32 rowsCount, const std::shared_ptr<arrow::Scalar>& defValue)
+            : DefaultRowsCount(rowsCount)
+            , DefaultValue(defValue)
+        {
+            AFL_VERIFY(DefaultRowsCount);
         }
 
         TAssembleBlobInfo(const TString& data)
@@ -619,8 +642,8 @@ public:
             AFL_VERIFY(!!Data);
         }
 
-        ui32 GetNullRowsCount() const noexcept {
-            return NullRowsCount;
+        ui32 GetDefaultRowsCount() const noexcept {
+            return DefaultRowsCount;
         }
 
         const TString& GetData() const noexcept {
@@ -628,11 +651,11 @@ public:
         }
 
         bool IsBlob() const {
-            return !NullRowsCount && !!Data;
+            return !DefaultRowsCount && !!Data;
         }
 
-        bool IsNull() const {
-            return NullRowsCount && !Data;
+        bool IsDefault() const {
+            return DefaultRowsCount && !Data;
         }
 
         std::shared_ptr<arrow::RecordBatch> BuildRecordBatch(const TColumnLoader& loader) const;
@@ -768,7 +791,7 @@ public:
 
         TPreparedColumn Compile() {
             if (BlobsInfo.empty()) {
-                BlobsInfo.emplace_back(TAssembleBlobInfo(NumRows));
+                BlobsInfo.emplace_back(TAssembleBlobInfo(NumRows, DataLoader ? DataLoader->GetDefaultValue() : ResultLoader->GetDefaultValue()));
                 return TPreparedColumn(std::move(BlobsInfo), ResultLoader);
             } else {
                 AFL_VERIFY(NumRowsByChunks == NumRows)("by_chunks", NumRowsByChunks)("expected", NumRows);

@@ -302,13 +302,17 @@ struct TEvWhiteboard{
         TEvBSGroupStateUpdate() = default;
 
         TEvBSGroupStateUpdate(const TIntrusivePtr<TBlobStorageGroupInfo>& groupInfo) {
-            Record.SetGroupID(groupInfo->GroupID);
+            Record.SetGroupID(groupInfo->GroupID.GetRawId());
             Record.SetGroupGeneration(groupInfo->GroupGeneration);
             Record.SetErasureSpecies(groupInfo->Type.ErasureSpeciesName(groupInfo->Type.GetErasure()));
-            for (ui32 i = 0; i < groupInfo->GetTotalVDisksNum(); ++i) {
-                VDiskIDFromVDiskID(groupInfo->GetVDiskId(i), Record.AddVDiskIds());
-                const TActorId& actorId = groupInfo->GetActorId(i);
-                Record.AddVDiskNodeIds(actorId.NodeId());
+            if (ui32 numVDisks = groupInfo->GetTotalVDisksNum()) {
+                for (ui32 i = 0; i < numVDisks; ++i) {
+                    VDiskIDFromVDiskID(groupInfo->GetVDiskId(i), Record.AddVDiskIds());
+                    const TActorId& actorId = groupInfo->GetActorId(i);
+                    Record.AddVDiskNodeIds(actorId.NodeId());
+                }
+            } else {
+                Record.SetNoVDisksInGroup(true);
             }
             Record.SetStoragePoolName(groupInfo->GetStoragePoolName());
             if (groupInfo->GetEncryptionMode() != TBlobStorageGroupInfo::EEM_NONE) {
@@ -357,12 +361,13 @@ struct TEvWhiteboard{
             }
         }
 
-        TEvSystemStateUpdate(const TVector<std::tuple<TString, double, ui32>>& poolStats) {
+        TEvSystemStateUpdate(const TVector<std::tuple<TString, double, ui32, ui32>>& poolStats) {
             for (const auto& row : poolStats) {
                 auto& pb = *Record.AddPoolStats();
                 pb.SetName(std::get<0>(row));
                 pb.SetUsage(std::get<1>(row));
                 pb.SetThreads(std::get<2>(row));
+                pb.SetLimit(std::get<3>(row));
             }
         }
 

@@ -58,7 +58,7 @@ protected:
     const ui32 IntervalIdx;
     std::optional<NArrow::TShardedRecordBatch> ShardedBatch;
 
-    [[nodiscard]] std::optional<NArrow::NMerger::TSortableBatchPosition> DrainMergerLinearScan(const std::optional<ui32> resultBufferLimit);
+    [[nodiscard]] std::optional<NArrow::NMerger::TCursor> DrainMergerLinearScan(const std::optional<ui32> resultBufferLimit);
 
     void PrepareResultBatch();
 private:
@@ -80,7 +80,8 @@ private:
     bool OnlyEmptySources = true;
     THashMap<ui32, std::shared_ptr<IDataSource>> Sources;
 protected:
-    virtual bool DoExecute() override;
+    virtual TConclusionStatus DoExecuteImpl() override;
+
 public:
     virtual TString GetTaskClassIdentifier() const override {
         return "CS::MERGE_START";
@@ -94,7 +95,8 @@ class TContinueMergeTask: public TBaseMergeTask {
 private:
     using TBase = TBaseMergeTask;
 protected:
-    virtual bool DoExecute() override;
+    virtual TConclusionStatus DoExecuteImpl() override;
+
 public:
     virtual TString GetTaskClassIdentifier() const override {
         return "CS::MERGE_CONTINUE";

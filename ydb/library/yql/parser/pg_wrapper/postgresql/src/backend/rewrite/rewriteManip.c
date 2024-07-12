@@ -2,7 +2,7 @@
  *
  * rewriteManip.c
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -951,12 +951,15 @@ getInsertSelectQuery(Query *parsetree, Query ***subquery_ptr)
 	if (list_length(parsetree->jointree->fromlist) != 1)
 		elog(ERROR, "expected to find SELECT subquery");
 	rtr = (RangeTblRef *) linitial(parsetree->jointree->fromlist);
-	Assert(IsA(rtr, RangeTblRef));
-	selectrte = rt_fetch(rtr->rtindex, parsetree->rtable);
-	selectquery = selectrte->subquery;
-	if (!(selectquery && IsA(selectquery, Query) &&
-		  selectquery->commandType == CMD_SELECT))
+	if (!IsA(rtr, RangeTblRef))
 		elog(ERROR, "expected to find SELECT subquery");
+	selectrte = rt_fetch(rtr->rtindex, parsetree->rtable);
+	if (!(selectrte->rtekind == RTE_SUBQUERY &&
+		  selectrte->subquery &&
+		  IsA(selectrte->subquery, Query) &&
+		  selectrte->subquery->commandType == CMD_SELECT))
+		elog(ERROR, "expected to find SELECT subquery");
+	selectquery = selectrte->subquery;
 	if (list_length(selectquery->rtable) >= 2 &&
 		strcmp(rt_fetch(PRS2_OLD_VARNO, selectquery->rtable)->eref->aliasname,
 			   "old") == 0 &&
@@ -1424,8 +1427,8 @@ ReplaceVarsFromTargetList_callback(Var *var,
 		 * If generating an expansion for a var of a named rowtype (ie, this
 		 * is a plain relation RTE), then we must include dummy items for
 		 * dropped columns.  If the var is RECORD (ie, this is a JOIN), then
-		 * omit dropped columns.  Either way, attach column names to the
-		 * RowExpr for use of ruleutils.c.
+		 * omit dropped columns.  In the latter case, attach column names to
+		 * the RowExpr for use of the executor and ruleutils.c.
 		 */
 		expandRTE(rcon->target_rte,
 				  var->varno, var->varlevelsup, var->location,
@@ -1438,7 +1441,7 @@ ReplaceVarsFromTargetList_callback(Var *var,
 		rowexpr->args = fields;
 		rowexpr->row_typeid = var->vartype;
 		rowexpr->row_format = COERCE_IMPLICIT_CAST;
-		rowexpr->colnames = colnames;
+		rowexpr->colnames = (var->vartype == RECORDOID) ? colnames : NIL;
 		rowexpr->location = var->location;
 
 		return (Node *) rowexpr;

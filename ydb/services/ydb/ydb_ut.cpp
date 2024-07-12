@@ -1,8 +1,8 @@
 #include <library/cpp/testing/unittest/tests_data.h>
 #include <library/cpp/testing/unittest/registar.h>
 
-#include <grpc++/client_context.h>
-#include <grpc++/create_channel.h>
+#include <grpcpp/client_context.h>
+#include <grpcpp/create_channel.h>
 
 #include <ydb/core/base/storage_pools.h>
 #include <ydb/core/kqp/ut/common/kqp_ut_common.h>
@@ -41,6 +41,35 @@
 #include "ydb_common_ut.h"
 
 #include <util/generic/ymath.h>
+
+namespace NYdb {
+
+Ydb::StatusIds::StatusCode WaitForStatus(
+    std::shared_ptr<grpc::Channel> channel, const TString& opId, TString* error, int retries, TDuration sleepDuration
+) {
+    std::unique_ptr<Ydb::Operation::V1::OperationService::Stub> stub;
+    stub = Ydb::Operation::V1::OperationService::NewStub(channel);
+    Ydb::Operations::GetOperationRequest request;
+    request.set_id(opId);
+    Ydb::Operations::GetOperationResponse response;
+    for (int retry = 0; retry <= retries; ++retry) {
+        grpc::ClientContext context;
+        auto grpcStatus = stub->GetOperation(&context, request, &response);
+        UNIT_ASSERT_C(grpcStatus.ok(), grpcStatus.error_message());
+        if (response.operation().ready()) {
+            break;
+        }
+        Sleep(sleepDuration *= 2);
+    }
+    if (error && response.operation().issues_size() > 0) {
+        NYql::TIssues issues;
+        NYql::IssuesFromMessage(response.operation().issues(), issues);
+        *error = issues.ToString();
+    }
+    return response.operation().status();
+}
+
+}
 
 namespace NKikimr {
 
@@ -97,26 +126,6 @@ Ydb::Table::DescribeTableResult DescribeTable(std::shared_ptr<grpc::Channel> cha
 
 
 Ydb::Table::ExecuteQueryResult ExecYql(std::shared_ptr<grpc::Channel> channel, const TString &sessionId, const TString &yql, bool withStat = false);
-
-static Ydb::StatusIds::StatusCode WaitForStatus(std::shared_ptr<grpc::Channel> channel, const TString& opId) {
-    std::unique_ptr<Ydb::Operation::V1::OperationService::Stub> stub;
-    stub = Ydb::Operation::V1::OperationService::NewStub(channel);
-    Ydb::Operations::GetOperationRequest request;
-    request.set_id(opId);
-    Ydb::Operations::GetOperationResponse response;
-    bool run = true;
-    while (run) {
-        grpc::ClientContext context;
-        auto status = stub->GetOperation(&context, request, &response);
-        UNIT_ASSERT(status.ok());  //GRpc layer - OK
-        if (response.operation().ready() == false) {
-            Sleep(ITERATION_DURATION);
-        } else {
-            run = false;
-        }
-    }
-    return response.operation().status();
-}
 
 struct TKikimrTestSettings {
     static constexpr bool SSL = false;
@@ -1621,6 +1630,14 @@ indexes {
   name: "IndexedValue"
   index_columns: "IValue"
   global_index {
+    settings {
+      partitioning_settings {
+        partitioning_by_size: ENABLED
+        partition_size_mb: 2048
+        partitioning_by_load: DISABLED
+        min_partitions_count: 1
+      }
+    }
   }
   status: STATUS_READY
 }
@@ -5574,7 +5591,7 @@ Y_UNIT_TEST(DisableWritesToDatabase) {
     auto sender = runtime.AllocateEdgeActor();
     InitRoot(server, sender);
 
-    runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NLog::PRI_DEBUG);
+    runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NLog::PRI_TRACE);
     NDataShard::gDbStatsReportInterval = TDuration::Seconds(0);
     NDataShard::gDbStatsDataSizeResolution = 1;
     NDataShard::gDbStatsRowCountResolution = 1;

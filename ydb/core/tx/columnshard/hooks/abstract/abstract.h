@@ -88,12 +88,28 @@ public:
     using TPtr = std::shared_ptr<ICSController>;
     virtual ~ICSController() = default;
 
+    virtual TDuration GetOverridenGCPeriod(const TDuration def) const {
+        return def;
+    }
+
+    virtual void OnSelectShardingFilter() {
+    
+    }
+
+    virtual TDuration GetCompactionActualizationLag(const TDuration def) const {
+        return def;
+    }
+
     virtual NColumnShard::TBlobPutResult::TPtr OverrideBlobPutResultOnCompaction(const NColumnShard::TBlobPutResult::TPtr original, const NOlap::TWriteActionsCollection& /*actions*/) const {
         return original;
     }
 
     virtual TDuration GetRemovedPortionLivetime(const TDuration def) const {
         return def;
+    }
+
+    virtual TDuration GetActualizationTasksLag(const TDuration d) const {
+        return d;
     }
 
     virtual ui64 GetReduceMemoryIntervalLimit(const ui64 def) const {
@@ -202,6 +218,14 @@ public:
         static std::shared_ptr<NColumnShard::NTiers::TConfigsSnapshot> result = std::make_shared<NColumnShard::NTiers::TConfigsSnapshot>(TInstant::Now());
         return result;
     }
+
+    virtual void OnSwitchToWork(const ui64 tabletId) {
+        Y_UNUSED(tabletId);
+    }
+
+    virtual void OnCleanupActors(const ui64 tabletId) {
+        Y_UNUSED(tabletId);
+    }
 };
 
 class TControllers {
@@ -237,6 +261,12 @@ public:
 
     static ICSController::TPtr GetColumnShardController() {
         return Singleton<TControllers>()->CSController;
+    }
+
+    template <class T>
+    static T* GetControllerAs() {
+        auto controller = Singleton<TControllers>()->CSController;
+        return dynamic_cast<T*>(controller.get());
     }
 };
 

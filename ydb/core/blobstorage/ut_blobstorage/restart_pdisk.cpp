@@ -35,6 +35,7 @@ Y_UNIT_TEST_SUITE(BSCRestartPDisk) {
             auto& diskId =  it->first;
 
             NKikimrBlobStorage::TConfigRequest request;
+            request.SetIgnoreDegradedGroupsChecks(true);
 
             NKikimrBlobStorage::TRestartPDisk* cmd = request.AddCommand()->MutableRestartPDisk();
             auto pdiskId = cmd->MutableTargetPDiskId();
@@ -50,7 +51,7 @@ Y_UNIT_TEST_SUITE(BSCRestartPDisk) {
                 // Restarting third disk will not be allowed.
                 UNIT_ASSERT_C(!response.GetSuccess(), "Restart should've been prohibited");
 
-                UNIT_ASSERT_STRING_CONTAINS(response.GetErrorDescription(), "ExpectedStatus# DISINTEGRATED");
+                UNIT_ASSERT_STRING_CONTAINS(response.GetErrorDescription(), "Disintegrated");
                 break;
             }
         }
@@ -181,7 +182,7 @@ Y_UNIT_TEST_SUITE(BSCRestartPDisk) {
                     if (serviceSetUpdate) {
                         const auto &pdisks = serviceSetUpdate->Record.GetServiceSet().GetPDisks();
                         const auto &pdisk = pdisks[0];
-                        UNIT_ASSERT(pdisk.GetEntityStatus() == NKikimrBlobStorage::RESTART);
+                        UNIT_ASSERT_EQUAL(NKikimrBlobStorage::RESTART, pdisk.GetEntityStatus());
                         gotServiceSetUpdate = true;
                     }
                 }

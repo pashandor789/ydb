@@ -39,9 +39,6 @@ static bool ConvertData(TCell& cell, const NScheme::TTypeInfo& colType, TMemoryP
             cell = TCell(saved.data(), saved.size());
             break;
         }
-        case NScheme::NTypeIds::Decimal:
-            errorMessage = "Decimal conversion is not supported yet";
-            return false;
         default:
             break;
     }
@@ -51,7 +48,7 @@ static bool ConvertData(TCell& cell, const NScheme::TTypeInfo& colType, TMemoryP
 static arrow::Status ConvertColumn(const NScheme::TTypeInfo colType, std::shared_ptr<arrow::Array>& column, std::shared_ptr<arrow::Field>& field) {
     switch (colType.GetTypeId()) {
     case NScheme::NTypeIds::Decimal:
-        return arrow::Status::TypeError("Cannot convert Decimal type");
+        return arrow::Status::OK();
     case NScheme::NTypeIds::JsonDocument: {
         const static TSet<arrow::Type::type> jsonDocArrowTypes{ arrow::Type::BINARY, arrow::Type::STRING };
         if (!jsonDocArrowTypes.contains(column->type()->id())) {
@@ -182,9 +179,18 @@ static std::shared_ptr<arrow::Array> InplaceConvertColumn(const std::shared_ptr<
             newData->type = arrow::timestamp(arrow::TimeUnit::MICRO);
             return std::make_shared<arrow::TimestampArray>(newData);
         }
+        case NScheme::NTypeIds::Date32: {
+
+            Y_ABORT_UNLESS(arrow::bit_width(column->type()->id()) == 32);
+
+            auto newData = column->data()->Copy();
+            newData->type = arrow::int32();
+            return std::make_shared<arrow::NumericArray<arrow::Int32Type>>(newData);
+        }
         case NScheme::NTypeIds::Timestamp64:
-        case NScheme::NTypeIds::Interval64: {
-            Y_ABORT_UNLESS(arrow::is_primitive(column->type()->id()));
+        case NScheme::NTypeIds::Interval64:
+        case NScheme::NTypeIds::Datetime64: {
+
             Y_ABORT_UNLESS(arrow::bit_width(column->type()->id()) == 64);
 
             auto newData = column->data()->Copy();
@@ -237,11 +243,13 @@ bool TArrowToYdbConverter::NeedInplaceConversion(const NScheme::TTypeInfo& typeI
             return typeInRequest.GetTypeId() == NScheme::NTypeIds::Utf8;
         case NScheme::NTypeIds::Date:
             return typeInRequest.GetTypeId() == NScheme::NTypeIds::Uint16;
+        case NScheme::NTypeIds::Date32:
         case NScheme::NTypeIds::Datetime:
             return typeInRequest.GetTypeId() == NScheme::NTypeIds::Int32;
         case NScheme::NTypeIds::Timestamp:
         case NScheme::NTypeIds::Timestamp64:
         case NScheme::NTypeIds::Interval64:
+        case NScheme::NTypeIds::Datetime64:
             return typeInRequest.GetTypeId() == NScheme::NTypeIds::Int64;
         default:
             break;

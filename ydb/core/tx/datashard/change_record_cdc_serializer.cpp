@@ -81,6 +81,10 @@ protected:
 public:
     using TBaseSerializer::TBaseSerializer;
 
+    TString DebugString(const TChangeRecord&) override {
+        return "TProtoSerializer::DebugString() is not implemented";
+    }
+
 }; // TProtoSerializer
 
 class TJsonSerializer: public TBaseSerializer {
@@ -148,6 +152,12 @@ protected:
             return NJson::TJsonValue(TInstant::MicroSeconds(cell.AsValue<ui64>()).ToString());
         case NScheme::NTypeIds::Interval:
             return NJson::TJsonValue(cell.AsValue<i64>());
+        case NScheme::NTypeIds::Date32:
+            return NJson::TJsonValue(cell.AsValue<i32>());
+        case NScheme::NTypeIds::Datetime64:
+        case NScheme::NTypeIds::Interval64:
+        case NScheme::NTypeIds::Timestamp64:
+            return NJson::TJsonValue(cell.AsValue<i64>());            
         case NScheme::NTypeIds::Decimal:
             return NJson::TJsonValue(DecimalToString(cell.AsValue<std::pair<ui64, i64>>()));
         case NScheme::NTypeIds::DyNumber:
@@ -225,13 +235,16 @@ protected:
         }
     }
 
+    TString JsonToString(const NJson::TJsonValue& json) const {
+        TStringStream str;
+        NJson::WriteJson(&str, &json, JsonConfig);
+        return str.Str();
+    }
+
     void FillDataChunk(NKikimrPQClient::TDataChunk& data, const TChangeRecord& record) override {
         NJson::TJsonValue json;
         SerializeToJson(json, record);
-
-        TStringStream str;
-        NJson::WriteJson(&str, &json, JsonConfig);
-        data.SetData(str.Str());
+        data.SetData(JsonToString(json));
     }
 
     virtual void SerializeToJson(NJson::TJsonValue& json, const TChangeRecord& record) = 0;
@@ -249,6 +262,20 @@ public:
         }
     }
 
+    TString DebugString(const TChangeRecord& record) override {
+        NJson::TJsonValue json;
+        SerializeToJson(json, record);
+
+        if (record.GetLockId()) {
+            json["lock"]["id"] = record.GetLockId();
+            json["lock"]["offset"] = record.GetLockOffset();
+        } else {
+            json["order"] = record.GetOrder();
+        }
+
+        return JsonToString(json);
+    }
+
 protected:
     const NJson::TJsonWriterConfig JsonConfig;
 
@@ -261,11 +288,20 @@ protected:
             return SerializeVirtualTimestamp(json["resolved"], {record.GetStep(), record.GetTxId()});
         }
 
-        Y_ABORT_UNLESS(record.GetKind() == TChangeRecord::EKind::CdcDataChange);
         Y_ABORT_UNLESS(record.GetSchema());
-
         const auto body = ParseBody(record.GetBody());
-        SerializeJsonKey(record.GetSchema(), json["key"], body.GetKey());
+
+        switch (record.GetKind()) {
+        case TChangeRecord::EKind::AsyncIndex:
+            Y_ABORT_UNLESS(Opts.Debug);
+            SerializeJsonValue(record.GetSchema(), json["key"], body.GetKey());
+            break;
+        case TChangeRecord::EKind::CdcDataChange:
+            SerializeJsonKey(record.GetSchema(), json["key"], body.GetKey());
+            break;
+        default:
+            Y_ABORT("Unexpected record");
+        }
 
         if (body.HasOldImage()) {
             SerializeJsonValue(record.GetSchema(), json["oldImage"], body.GetOldImage());
@@ -334,6 +370,9 @@ class TDynamoDBStreamsJsonSerializer: public TJsonSerializer {
             } else if (name.StartsWith("__Hash_")) {
                 bool indexed = false;
                 for (const auto& [_, index] : schema->Indexes) {
+                    if (index.Type != TUserTable::TTableIndex::EType::EIndexTypeGlobalAsync) {
+                        continue;
+                    }
                     Y_ABORT_UNLESS(index.KeyColumnIds.size() >= 1);
                     if (index.KeyColumnIds.at(0) == tag) {
                         indexed = true;
@@ -520,6 +559,12 @@ public:
 
 }; // TDebeziumJsonSerializer
 
+TChangeRecordSerializerOpts TChangeRecordSerializerOpts::DebugOpts() {
+    TChangeRecordSerializerOpts opts;
+    opts.Debug = true;
+    return opts;
+}
+
 IChangeRecordSerializer* CreateChangeRecordSerializer(const TChangeRecordSerializerOpts& opts) {
     switch (opts.StreamFormat) {
     case TUserTable::TCdcStream::EFormat::ECdcStreamFormatProto:
@@ -533,6 +578,10 @@ IChangeRecordSerializer* CreateChangeRecordSerializer(const TChangeRecordSeriali
     default:
         Y_ABORT("Unsupported format");
     }
+}
+
+IChangeRecordSerializer* CreateChangeRecordDebugSerializer() {
+    return new TYdbJsonSerializer(TChangeRecordSerializerOpts::DebugOpts());
 }
 
 TString TChangeRecord::GetPartitionKey() const {

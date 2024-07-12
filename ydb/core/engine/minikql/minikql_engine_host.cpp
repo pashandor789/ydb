@@ -73,7 +73,7 @@ bool TEngineHost::IsValidKey(TKeyDesc& key) const {
     return NMiniKQL::IsValidKey(Scheme, localTableId, key);
 }
 ui64 TEngineHost::CalculateReadSize(const TVector<const TKeyDesc*>& keys) const {
-    NTable::TSizeEnv env;
+    auto env = Db.CreateSizeEnv();
 
     for (const TKeyDesc* ki : keys) {
         DoCalculateReadSize(*ki, env);
@@ -120,7 +120,7 @@ ui64 TEngineHost::CalculateResultSize(const TKeyDesc& key) const {
     if (key.Range.Point) {
         return Db.EstimateRowSize(localTid);
     } else {
-        NTable::TSizeEnv env;
+        auto env = Db.CreateSizeEnv();
         DoCalculateReadSize(key, env);
         ui64 size = env.GetSize();
 
@@ -1090,7 +1090,7 @@ NUdf::TUnboxedValue GetCellValue(const TCell& cell, NScheme::TTypeInfo type) {
         return NYql::NCommon::PgValueFromNativeBinary(cell.AsBuf(), NPg::PgTypeIdFromTypeDesc(type.GetTypeDesc()));
     }
 
-    Y_DEBUG_ABORT_UNLESS(false, "Unsupported type: %" PRIu16, type.GetTypeId());
+    Y_DEBUG_ABORT("Unsupported type: %" PRIu16, type.GetTypeId());
     return MakeString(NUdf::TStringRef(cell.Data(), cell.Size()));
 }
 

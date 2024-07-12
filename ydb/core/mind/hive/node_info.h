@@ -132,7 +132,11 @@ public:
     ui32 GetTabletNeighboursCount(const TTabletInfo& tablet) const {
         auto it = TabletsOfObject.find(tablet.GetObjectId());
         if (it != TabletsOfObject.end()) {
-            return it->second.size();
+            auto count = it->second.size();
+            if (tablet.IsAliveOnLocal(Local)) {
+                --count;
+            }
+            return count;
         } else {
             return 0;
         }
@@ -243,9 +247,9 @@ public:
     }
 
     double GetNodeUsageForTablet(const TTabletInfo& tablet) const;
-    double GetNodeUsage(EResourceToBalance resource = EResourceToBalance::Dominant) const;
+    double GetNodeUsage(EResourceToBalance resource = EResourceToBalance::ComputeResources) const;
     double GetNodeUsage(const TResourceNormalizedValues& normValues,
-                        EResourceToBalance resource = EResourceToBalance::Dominant) const;
+                        EResourceToBalance resource = EResourceToBalance::ComputeResources) const;
 
     ui64 GetTabletsRunningByType(TTabletTypes::EType tabletType) const;
 

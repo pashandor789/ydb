@@ -33,9 +33,12 @@ public:
         Node() = default;
         Node(Node&&) = default;
         Node(ui32 id, ui64 tabletId);
+        Node(ui32 id, ui64 tabletId, const TString& from, const TString& to);
 
         ui32 Id;
         ui64 TabletId;
+        TString From;
+        TString To;
 
         // Direct parents of this node
         std::vector<Node*> Parents;
@@ -43,6 +46,8 @@ public:
         std::vector<Node*> Children;
         // All parents include parents of parents and so on
         std::set<Node*> HierarhicalParents;
+
+        bool IsRoot() const;
     };
 
     TPartitionGraph();

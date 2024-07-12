@@ -3,7 +3,7 @@
  * jsonapi.c
  *		JSON parser and lexer interfaces
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -20,18 +20,8 @@
 #include "common/jsonapi.h"
 #include "mb/pg_wchar.h"
 
-#ifdef FRONTEND
-#error #include "common/logging.h"
-#else
+#ifndef FRONTEND
 #include "miscadmin.h"
-#endif
-
-#ifdef FRONTEND
-#define check_stack_depth()
-#define json_log_and_abort(...) \
-	do { pg_log_fatal(__VA_ARGS__); exit(1); } while(0)
-#else
-#define json_log_and_abort(...) elog(ERROR, __VA_ARGS__)
 #endif
 
 /*
@@ -61,7 +51,6 @@ static JsonParseErrorType parse_object(JsonLexContext *lex, JsonSemAction *sem);
 static JsonParseErrorType parse_array_element(JsonLexContext *lex, JsonSemAction *sem);
 static JsonParseErrorType parse_array(JsonLexContext *lex, JsonSemAction *sem);
 static JsonParseErrorType report_parse_error(JsonParseContext ctx, JsonLexContext *lex);
-static char *extract_token(JsonLexContext *lex);
 
 /* the null action object used for pure validation */
 const JsonSemAction nullSemAction =
@@ -378,7 +367,9 @@ parse_object(JsonLexContext *lex, JsonSemAction *sem)
 	JsonTokenType tok;
 	JsonParseErrorType result;
 
+#ifndef FRONTEND
 	check_stack_depth();
+#endif
 
 	if (ostart != NULL)
 		(*ostart) (sem->semstate);
@@ -478,7 +469,9 @@ parse_array(JsonLexContext *lex, JsonSemAction *sem)
 	json_struct_action aend = sem->array_end;
 	JsonParseErrorType result;
 
+#ifndef FRONTEND
 	check_stack_depth();
+#endif
 
 	if (astart != NULL)
 		(*astart) (sem->semstate);
@@ -665,7 +658,6 @@ json_lex(JsonLexContext *lex)
 						lex->token_type = JSON_TOKEN_FALSE;
 					else
 						return JSON_INVALID_TOKEN;
-
 				}
 		}						/* end of switch */
 	}
@@ -675,6 +667,14 @@ json_lex(JsonLexContext *lex)
 
 /*
  * The next token in the input stream is known to be a string; lex it.
+ *
+ * If lex->strval isn't NULL, fill it with the decoded string.
+ * Set lex->token_terminator to the end of the decoded input, and in
+ * success cases, transfer its previous value to lex->prev_token_terminator.
+ * Return JSON_SUCCESS or an error code.
+ *
+ * Note: be careful that all error exits advance lex->token_terminator
+ * to the point after the character we detected the error on.
  */
 static inline JsonParseErrorType
 json_lex_string(JsonLexContext *lex)
@@ -682,6 +682,19 @@ json_lex_string(JsonLexContext *lex)
 	char	   *s;
 	int			len;
 	int			hi_surrogate = -1;
+
+	/* Convenience macros for error exits */
+#define FAIL_AT_CHAR_START(code) \
+	do { \
+		lex->token_terminator = s; \
+		return code; \
+	} while (0)
+#define FAIL_AT_CHAR_END(code) \
+	do { \
+		lex->token_terminator = \
+			s + pg_encoding_mblen_bounded(lex->input_encoding, s); \
+		return code; \
+	} while (0)
 
 	if (lex->strval != NULL)
 		resetStringInfo(lex->strval);
@@ -695,18 +708,14 @@ json_lex_string(JsonLexContext *lex)
 		len++;
 		/* Premature end of the string. */
 		if (len >= lex->input_length)
-		{
-			lex->token_terminator = s;
-			return JSON_INVALID_TOKEN;
-		}
+			FAIL_AT_CHAR_START(JSON_INVALID_TOKEN);
 		else if (*s == '"')
 			break;
 		else if ((unsigned char) *s < 32)
 		{
 			/* Per RFC4627, these characters MUST be escaped. */
 			/* Since *s isn't printable, exclude it from the context string */
-			lex->token_terminator = s;
-			return JSON_ESCAPING_REQUIRED;
+			FAIL_AT_CHAR_START(JSON_ESCAPING_REQUIRED);
 		}
 		else if (*s == '\\')
 		{
@@ -714,10 +723,7 @@ json_lex_string(JsonLexContext *lex)
 			s++;
 			len++;
 			if (len >= lex->input_length)
-			{
-				lex->token_terminator = s;
-				return JSON_INVALID_TOKEN;
-			}
+				FAIL_AT_CHAR_START(JSON_INVALID_TOKEN);
 			else if (*s == 'u')
 			{
 				int			i;
@@ -728,10 +734,7 @@ json_lex_string(JsonLexContext *lex)
 					s++;
 					len++;
 					if (len >= lex->input_length)
-					{
-						lex->token_terminator = s;
-						return JSON_INVALID_TOKEN;
-					}
+						FAIL_AT_CHAR_START(JSON_INVALID_TOKEN);
 					else if (*s >= '0' && *s <= '9')
 						ch = (ch * 16) + (*s - '0');
 					else if (*s >= 'a' && *s <= 'f')
@@ -739,10 +742,7 @@ json_lex_string(JsonLexContext *lex)
 					else if (*s >= 'A' && *s <= 'F')
 						ch = (ch * 16) + (*s - 'A') + 10;
 					else
-					{
-						lex->token_terminator = s + pg_encoding_mblen_bounded(lex->input_encoding, s);
-						return JSON_UNICODE_ESCAPE_FORMAT;
-					}
+						FAIL_AT_CHAR_END(JSON_UNICODE_ESCAPE_FORMAT);
 				}
 				if (lex->strval != NULL)
 				{
@@ -752,20 +752,20 @@ json_lex_string(JsonLexContext *lex)
 					if (is_utf16_surrogate_first(ch))
 					{
 						if (hi_surrogate != -1)
-							return JSON_UNICODE_HIGH_SURROGATE;
+							FAIL_AT_CHAR_END(JSON_UNICODE_HIGH_SURROGATE);
 						hi_surrogate = ch;
 						continue;
 					}
 					else if (is_utf16_surrogate_second(ch))
 					{
 						if (hi_surrogate == -1)
-							return JSON_UNICODE_LOW_SURROGATE;
+							FAIL_AT_CHAR_END(JSON_UNICODE_LOW_SURROGATE);
 						ch = surrogate_pair_to_codepoint(hi_surrogate, ch);
 						hi_surrogate = -1;
 					}
 
 					if (hi_surrogate != -1)
-						return JSON_UNICODE_LOW_SURROGATE;
+						FAIL_AT_CHAR_END(JSON_UNICODE_LOW_SURROGATE);
 
 					/*
 					 * Reject invalid cases.  We can't have a value above
@@ -775,7 +775,7 @@ json_lex_string(JsonLexContext *lex)
 					if (ch == 0)
 					{
 						/* We can't allow this, since our TEXT type doesn't */
-						return JSON_UNICODE_CODE_POINT_ZERO;
+						FAIL_AT_CHAR_END(JSON_UNICODE_CODE_POINT_ZERO);
 					}
 
 					/*
@@ -812,14 +812,14 @@ json_lex_string(JsonLexContext *lex)
 						appendStringInfoChar(lex->strval, (char) ch);
 					}
 					else
-						return JSON_UNICODE_HIGH_ESCAPE;
+						FAIL_AT_CHAR_END(JSON_UNICODE_HIGH_ESCAPE);
 #endif							/* FRONTEND */
 				}
 			}
 			else if (lex->strval != NULL)
 			{
 				if (hi_surrogate != -1)
-					return JSON_UNICODE_LOW_SURROGATE;
+					FAIL_AT_CHAR_END(JSON_UNICODE_LOW_SURROGATE);
 
 				switch (*s)
 				{
@@ -844,10 +844,14 @@ json_lex_string(JsonLexContext *lex)
 						appendStringInfoChar(lex->strval, '\t');
 						break;
 					default:
-						/* Not a valid string escape, so signal error. */
+
+						/*
+						 * Not a valid string escape, so signal error.  We
+						 * adjust token_start so that just the escape sequence
+						 * is reported, not the whole string.
+						 */
 						lex->token_start = s;
-						lex->token_terminator = s + pg_encoding_mblen_bounded(lex->input_encoding, s);
-						return JSON_ESCAPING_INVALID;
+						FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
 				}
 			}
 			else if (strchr("\"\\/bfnrt", *s) == NULL)
@@ -860,28 +864,31 @@ json_lex_string(JsonLexContext *lex)
 				 * shown it's not a performance win.
 				 */
 				lex->token_start = s;
-				lex->token_terminator = s + pg_encoding_mblen_bounded(lex->input_encoding, s);
-				return JSON_ESCAPING_INVALID;
+				FAIL_AT_CHAR_END(JSON_ESCAPING_INVALID);
 			}
-
 		}
 		else if (lex->strval != NULL)
 		{
 			if (hi_surrogate != -1)
-				return JSON_UNICODE_LOW_SURROGATE;
+				FAIL_AT_CHAR_END(JSON_UNICODE_LOW_SURROGATE);
 
 			appendStringInfoChar(lex->strval, *s);
 		}
-
 	}
 
 	if (hi_surrogate != -1)
+	{
+		lex->token_terminator = s + 1;
 		return JSON_UNICODE_LOW_SURROGATE;
+	}
 
 	/* Hooray, we found the end of the string! */
 	lex->prev_token_terminator = lex->token_terminator;
 	lex->token_terminator = s + 1;
 	return JSON_SUCCESS;
+
+#undef FAIL_AT_CHAR_START
+#undef FAIL_AT_CHAR_END
 }
 
 /*
@@ -1044,15 +1051,34 @@ report_parse_error(JsonParseContext ctx, JsonLexContext *lex)
 
 	/*
 	 * We don't use a default: case, so that the compiler will warn about
-	 * unhandled enum values.  But this needs to be here anyway to cover the
-	 * possibility of an incorrect input.
+	 * unhandled enum values.
 	 */
-	json_log_and_abort("unexpected json parse state: %d", (int) ctx);
+	Assert(false);
 	return JSON_SUCCESS;		/* silence stupider compilers */
 }
 
+
+#ifndef FRONTEND
 /*
- * Construct a detail message for a JSON error.
+ * Extract the current token from a lexing context, for error reporting.
+ */
+static char *
+extract_token(JsonLexContext *lex)
+{
+	int			toklen = lex->token_terminator - lex->token_start;
+	char	   *token = palloc(toklen + 1);
+
+	memcpy(token, lex->token_start, toklen);
+	token[toklen] = '\0';
+	return token;
+}
+
+/*
+ * Construct an (already translated) detail message for a JSON error.
+ *
+ * Note that the error message generated by this routine may not be
+ * palloc'd, making it unsafe for frontend code as there is no way to
+ * know if this can be safely pfree'd or not.
  */
 char *
 json_errdetail(JsonParseErrorType error, JsonLexContext *lex)
@@ -1115,20 +1141,7 @@ json_errdetail(JsonParseErrorType error, JsonLexContext *lex)
 	 * unhandled enum values.  But this needs to be here anyway to cover the
 	 * possibility of an incorrect input.
 	 */
-	json_log_and_abort("unexpected json parse error type: %d", (int) error);
-	return NULL;				/* silence stupider compilers */
+	elog(ERROR, "unexpected json parse error type: %d", (int) error);
+	return NULL;
 }
-
-/*
- * Extract the current token from a lexing context, for error reporting.
- */
-static char *
-extract_token(JsonLexContext *lex)
-{
-	int			toklen = lex->token_terminator - lex->token_start;
-	char	   *token = palloc(toklen + 1);
-
-	memcpy(token, lex->token_start, toklen);
-	token[toklen] = '\0';
-	return token;
-}
+#endif

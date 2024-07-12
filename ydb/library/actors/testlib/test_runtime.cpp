@@ -804,6 +804,12 @@ namespace NActors {
         LogBackend = logBackend;
     }
 
+    void TTestActorRuntimeBase::SetLogBackendFactory(std::function<TAutoPtr<TLogBackend>()> logBackendFactory) {
+        Y_ABORT_UNLESS(!IsInitialized);
+        TGuard<TMutex> guard(Mutex);
+        LogBackendFactory = logBackendFactory;
+    }
+
     void TTestActorRuntimeBase::SetLogPriority(NActors::NLog::EComponent component, NActors::NLog::EPriority priority) {
         TGuard<TMutex> guard(Mutex);
         for (ui32 nodeIndex = 0; nodeIndex < NodeCount; ++nodeIndex) {
@@ -828,7 +834,7 @@ namespace NActors {
         return TMonotonic::MicroSeconds(CurrentTimestamp);
     }
 
-    void TTestActorRuntimeBase::UpdateCurrentTime(TInstant newTime) {
+    void TTestActorRuntimeBase::UpdateCurrentTime(TInstant newTime, bool rewind) {
         static int counter = 0;
         ++counter;
         if (VERBOSE) {
@@ -836,7 +842,7 @@ namespace NActors {
         }
         TGuard<TMutex> guard(Mutex);
         Y_ABORT_UNLESS(!UseRealThreads);
-        if (newTime.MicroSeconds() > CurrentTimestamp) {
+        if (rewind || newTime.MicroSeconds() > CurrentTimestamp) {
             CurrentTimestamp = newTime.MicroSeconds();
             for (auto& kv : Nodes) {
                 AtomicStore(kv.second->ActorSystemTimestamp, CurrentTimestamp);
@@ -1558,6 +1564,14 @@ namespace NActors {
         return FindActor(actorId, node);
     }
 
+    TStringBuf TTestActorRuntimeBase::FindActorName(const TActorId& actorId, ui32 nodeIndex) const {
+        auto actor = FindActor(actorId, nodeIndex);
+        if (!actor) {
+            return {};
+        }
+        return TLocalProcessKeyState<TActorActivityTag>::GetInstance().GetNameByIndex(actor->GetActivityType());
+    }
+
     void TTestActorRuntimeBase::EnableScheduleForActor(const TActorId& actorId, bool allow) {
         TGuard<TMutex> guard(Mutex);
         if (allow) {
@@ -1586,8 +1600,10 @@ namespace NActors {
         return node->DynamicCounters;
     }
 
-    void TTestActorRuntimeBase::SetupMonitoring() {
+    void TTestActorRuntimeBase::SetupMonitoring(ui16 monitoringPortOffset, bool monitoringTypeAsync) {
         NeedMonitoring = true;
+        MonitoringPortOffset = monitoringPortOffset;
+        MonitoringTypeAsync = monitoringTypeAsync;
     }
 
     void TTestActorRuntimeBase::SendInternal(TAutoPtr<IEventHandle> ev, ui32 nodeIndex, bool viaActorSystem) {
@@ -1751,6 +1767,9 @@ namespace NActors {
         }
 
         if (!SingleSysEnv) { // Single system env should do this self
+            if (LogBackendFactory) {
+                LogBackend = LogBackendFactory();
+            }
             TAutoPtr<TLogBackend> logBackend = LogBackend ? LogBackend : NActors::CreateStderrBackend();
             NActors::TLoggerActor *loggerActor = new NActors::TLoggerActor(node->LogSettings,
                 logBackend, GetCountersForComponent(node->DynamicCounters, "utils"));

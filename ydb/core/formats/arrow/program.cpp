@@ -67,6 +67,9 @@ public:
             } else {
                 result = arrow::compute::CallFunction(funcName, *arguments, assign.GetOptions());
             }
+            if (result.ok() && funcName == "count"sv) {
+                result = result->scalar()->CastTo(std::make_shared<arrow::UInt64Type>());
+            }
             if (result.ok()) {
                 return PrepareResult(std::move(*result), assign);
             }
@@ -859,7 +862,7 @@ arrow::Status TProgramStep::ApplyProjection(std::shared_ptr<arrow::RecordBatch>&
             return arrow::Status::Invalid("Wrong projection column '" + column.GetColumnName() + "'.");
         }
     }
-    batch = NArrow::ExtractColumns(batch, std::make_shared<arrow::Schema>(std::move(fields)));
+    batch = NArrow::TColumnOperator().Adapt(batch, std::make_shared<arrow::Schema>(std::move(fields))).DetachResult();
     return arrow::Status::OK();
 }
 

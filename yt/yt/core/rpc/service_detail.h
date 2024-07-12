@@ -196,7 +196,7 @@ public:
         }
 
         Request_->Context_ = underlyingContext.Get();
-        auto tracker = Request_->Context_->GetMemoryUsageTracker();
+        const auto& tracker = Request_->Context_->GetMemoryUsageTracker();
 
         const auto& requestHeader = this->GetRequestHeader();
         // COMPAT(danilalexeev): legacy RPC codecs
@@ -426,7 +426,7 @@ protected:
             return ::NYT::NRpc::TServiceBase::TLiteHandler(); \
         } \
         return \
-            BIND([=, this] ( \
+            BIND_NO_PROPAGATE([=, this] ( \
                 const ::NYT::NRpc::IServiceContextPtr&, \
                 const ::NYT::NRpc::THandlerInvocationOptions&) \
             { \

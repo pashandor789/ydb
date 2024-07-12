@@ -4,7 +4,8 @@
 #include <ydb/library/yql/core/yql_cost_function.h>
 
 #include <ydb/library/yql/providers/dq/common/yql_dq_settings.h>
-
+#include <ydb/library/yql/providers/dq/expr_nodes/dqs_expr_nodes.h>
+#include <ydb/library/yql/providers/s3/expr_nodes/yql_s3_expr_nodes.h>
 
 #include <charconv>
 
@@ -21,30 +22,55 @@ void InferStatisticsForReadTable(const TExprNode::TPtr& input, TTypeAnnotationCo
     const TKqpOptimizeContext& kqpCtx) {
 
     auto inputNode = TExprBase(input);
-    double nRows = 0;
-    int nAttrs = 0;
+    std::shared_ptr<TOptimizerStatistics> inputStats;
 
-    const TExprNode* path;
+    int nAttrs = 0;
+    bool readRange = false;
 
     if (auto readTable = inputNode.Maybe<TKqlReadTableBase>()) {
-        path = readTable.Cast().Table().Path().Raw();
+        inputStats = typeCtx->GetStats(readTable.Cast().Table().Raw());
         nAttrs = readTable.Cast().Columns().Size();
+
+        auto range = readTable.Cast().Range();
+        auto rangeFrom = range.From().Maybe<TKqlKeyTuple>();
+        auto rangeTo = range.To().Maybe<TKqlKeyTuple>();
+        if (rangeFrom && rangeTo) {
+            readRange = true;
+        }
     } else if (auto readRanges = inputNode.Maybe<TKqlReadTableRangesBase>()) {
-        path = readRanges.Cast().Table().Path().Raw();
+        inputStats = typeCtx->GetStats(readRanges.Cast().Table().Raw());
         nAttrs = readRanges.Cast().Columns().Size();
     } else {
         Y_ENSURE(false, "Invalid node type for InferStatisticsForReadTable");
     }
 
-    const auto& tableData = kqpCtx.Tables->ExistingTable(kqpCtx.Cluster, path->Content());
-    int totalAttrs = tableData.Metadata->Columns.size();
-    nRows = tableData.Metadata->RecordsCount;
-    double byteSize = tableData.Metadata->DataSize * (nAttrs / (double)totalAttrs);
+    /**
+     * We need index statistics to calculate this in the future
+     * Right now we use very small estimates to make sure CBO picks Lookup Joins
+     * I.e. there can be a chain of lookup joins in OLTP scenario and we want to make
+     * sure the cardinality doesn't blow up and lookup joins are still being picked
+     */
+    double inputRows = inputStats->Nrows;
+    double nRows = inputRows;
+    if (readRange) {
+        nRows = 1;
+    }
 
-    YQL_CLOG(TRACE, CoreDq) << "Infer statistics for read table, nrows:" << nRows << ", nattrs: " << nAttrs;
+    double sizePerRow = inputStats->ByteSize / (inputRows==0?1:inputRows);
+    double byteSize = nRows * sizePerRow * (nAttrs / (double)inputStats->Ncols);
 
-    auto outputStats = TOptimizerStatistics(EStatisticsType::BaseTable, nRows, nAttrs, byteSize, 0.0, tableData.Metadata->KeyColumnNames);
-    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(outputStats));
+    auto stats = std::make_shared<TOptimizerStatistics>(
+        EStatisticsType::BaseTable, 
+        nRows, 
+        nAttrs, 
+        byteSize, 
+        0.0, 
+        inputStats->KeyColumns,
+        inputStats->ColumnStatistics);
+
+    YQL_CLOG(TRACE, CoreDq) << "Infer statistics for read table, nrows: " << stats->Nrows << ", nattrs: " << stats->Ncols << ", byteSize: " << stats->ByteSize;
+
+    typeCtx->SetStats(input.Get(), stats);
 }
 
 /**
@@ -61,10 +87,16 @@ void InferStatisticsForKqpTable(const TExprNode::TPtr& input, TTypeAnnotationCon
     double nRows = tableData.Metadata->RecordsCount;
     double byteSize = tableData.Metadata->DataSize;
     int nAttrs = tableData.Metadata->Columns.size();
-    YQL_CLOG(TRACE, CoreDq) << "Infer statistics for table: " << path.Value() << ", nrows: " << nRows << ", nattrs: " << nAttrs << ", nKeyColumns: " << tableData.Metadata->KeyColumnNames.size();
 
-    auto outputStats = TOptimizerStatistics(EStatisticsType::BaseTable, nRows, nAttrs, byteSize, 0.0, tableData.Metadata->KeyColumnNames);
-    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(outputStats));
+    auto keyColumns = TIntrusivePtr<TOptimizerStatistics::TKeyColumns>(new TOptimizerStatistics::TKeyColumns(tableData.Metadata->KeyColumnNames));
+    auto stats = std::make_shared<TOptimizerStatistics>(EStatisticsType::BaseTable, nRows, nAttrs, byteSize, 0.0, keyColumns);
+    if (kqpCtx.Config->OverrideStatistics.Get()) {
+        stats = OverrideStatistics(*stats, path.Value(), *kqpCtx.Config->OverrideStatistics.Get());
+    }
+
+    YQL_CLOG(TRACE, CoreDq) << "Infer statistics for table: " << path.Value() << ", nrows: " << stats->Nrows << ", nattrs: " << stats->Ncols << ", nKeyColumns: " << stats->KeyColumns->Data.size();
+
+    typeCtx->SetStats(input.Get(), stats);
 }
 
 /**
@@ -84,8 +116,14 @@ void InferStatisticsForSteamLookup(const TExprNode::TPtr& input, TTypeAnnotation
     auto inputStats = typeCtx->GetStats(streamLookup.Table().Raw());
     auto byteSize = inputStats->ByteSize * (nAttrs / (double) inputStats->Ncols);
 
-    auto outputStats = TOptimizerStatistics(EStatisticsType::BaseTable, inputStats->Nrows, nAttrs, byteSize, 0, inputStats->KeyColumns);
-    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(outputStats));
+    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(
+        EStatisticsType::BaseTable, 
+        inputStats->Nrows, 
+        nAttrs, 
+        byteSize, 
+        0, 
+        inputStats->KeyColumns,
+        inputStats->ColumnStatistics));
 }
 
 /**
@@ -116,8 +154,14 @@ void InferStatisticsForLookupTable(const TExprNode::TPtr& input, TTypeAnnotation
         byteSize = 10;
     }
 
-    auto outputStats = TOptimizerStatistics(EStatisticsType::BaseTable, nRows, nAttrs, byteSize, 0, inputStats->KeyColumns);
-    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(outputStats));
+    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(
+        EStatisticsType::BaseTable, 
+        nRows,
+        nAttrs, 
+        byteSize, 
+        0, 
+        inputStats->KeyColumns,
+        inputStats->ColumnStatistics));
 }
 
 /**
@@ -134,7 +178,8 @@ void InferStatisticsForRowsSourceSettings(const TExprNode::TPtr& input, TTypeAnn
         return;
     }
 
-    double nRows = inputStats->Nrows;
+    double inputRows =  inputStats->Nrows;
+    double nRows = inputRows;
 
     // Check if we have a range expression, in that case just assign a single row to this read
     // We don't currently check the size of an index lookup
@@ -148,11 +193,12 @@ void InferStatisticsForRowsSourceSettings(const TExprNode::TPtr& input, TTypeAnn
     }
 
     int nAttrs = sourceSettings.Columns().Size();
-    double cost = inputStats->Cost;
-    double byteSize = inputStats->ByteSize * (nAttrs / (double)inputStats->Ncols);
 
-    auto outputStats = TOptimizerStatistics(EStatisticsType::BaseTable, nRows, nAttrs, byteSize, cost, inputStats->KeyColumns);
-    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(outputStats));
+    double sizePerRow = inputStats->ByteSize / (inputRows==0?1:inputRows);
+    double byteSize = nRows * sizePerRow * (nAttrs / (double)inputStats->Ncols);
+    double cost = inputStats->Cost;
+
+    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(EStatisticsType::BaseTable, nRows, nAttrs, byteSize, cost, inputStats->KeyColumns));
 }
 
 /**
@@ -160,8 +206,36 @@ void InferStatisticsForRowsSourceSettings(const TExprNode::TPtr& input, TTypeAnn
  * Currently we just make up a number for cardinality (5) and set cost to 0
  */
 void InferStatisticsForIndexLookup(const TExprNode::TPtr& input, TTypeAnnotationContext* typeCtx) {
-    auto outputStats = TOptimizerStatistics(EStatisticsType::BaseTable, 5, 5, 20, 0.0);
-    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(outputStats));
+    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(EStatisticsType::BaseTable, 5, 5, 20, 0.0));
+}
+
+void InferStatisticsForReadTableIndexRanges(const TExprNode::TPtr& input, TTypeAnnotationContext* typeCtx) {
+    auto indexRanges = TKqlReadTableIndexRanges(input);
+
+    auto inputStats = typeCtx->GetStats(indexRanges.Table().Raw());
+    if (!inputStats) {
+        return;
+    }
+    
+    TVector<TString> indexColumns;
+    for (auto c : indexRanges.Columns()) {
+        indexColumns.push_back(c.StringValue());
+    }
+
+    auto indexColumnsPtr = TIntrusivePtr<TOptimizerStatistics::TKeyColumns>(new TOptimizerStatistics::TKeyColumns(indexColumns));
+    auto stats = std::make_shared<TOptimizerStatistics>(
+        inputStats->Type, 
+        inputStats->Nrows, 
+        inputStats->Ncols, 
+        inputStats->ByteSize, 
+        inputStats->Cost, 
+        indexColumnsPtr,
+        inputStats->ColumnStatistics);
+
+    typeCtx->SetStats(input.Get(), stats);
+
+    YQL_CLOG(TRACE, CoreDq) << "Infer statistics for index: nrows: " << stats->Nrows << ", nattrs: " << stats->Ncols << ", nKeyColumns: " << stats->KeyColumns->Data.size();
+
 }
 
 /***
@@ -188,6 +262,34 @@ void InferStatisticsForResultBinding(const TExprNode::TPtr& input, TTypeAnnotati
 
             typeCtx->SetStats(param.Name().Raw(), txStats[bindingNo][resultNo]);
             typeCtx->SetStats(inputNode.Raw(), txStats[bindingNo][resultNo]);
+        }
+    }
+}
+
+void InferStatisticsForDqSourceWrap(const TExprNode::TPtr& input, TTypeAnnotationContext* typeCtx,
+    const TKqpOptimizeContext& kqpCtx) {
+    auto inputNode = TExprBase(input);
+    if (auto wrapBase = inputNode.Maybe<TDqSourceWrapBase>()) {
+        if (auto maybeS3DataSource = wrapBase.Cast().DataSource().Maybe<TS3DataSource>()) {
+            auto s3DataSource = maybeS3DataSource.Cast();
+            if (s3DataSource.Name()) {
+                auto path = s3DataSource.Name().Cast().StringValue();
+                if (kqpCtx.Config->OverrideStatistics.Get() && path) {
+                    auto stats = std::make_shared<TOptimizerStatistics>(EStatisticsType::BaseTable, 0.0, 0, 0, 0.0, TIntrusivePtr<TOptimizerStatistics::TKeyColumns>());
+                    stats = OverrideStatistics(*stats, path, *kqpCtx.Config->OverrideStatistics.Get());
+                    if (stats->ByteSize == 0.0) {
+                        auto n = path.find_last_of('/');
+                        if (n != path.npos) {
+                            stats = OverrideStatistics(*stats, path.substr(n + 1), *kqpCtx.Config->OverrideStatistics.Get());
+                        }
+                    }
+                    if (stats->ByteSize != 0.0) {
+                        YQL_CLOG(TRACE, CoreDq) << "Infer statistics for s3 data source " << path;
+                        typeCtx->SetStats(input.Get(), stats);
+                        typeCtx->SetStats(s3DataSource.Raw(), stats);
+                    }
+                }
+            }
         }
     }
 }
@@ -230,7 +332,10 @@ bool TKqpStatisticsTransformer::BeforeLambdasSpecific(const TExprNode::TPtr& inp
     Y_UNUSED(ctx);
     bool matched = true;
     // KQP Matchers
-    if(TKqlReadTableBase::Match(input.Get()) || TKqlReadTableRangesBase::Match(input.Get())){
+    if(TKqlReadTableIndexRanges::Match(input.Get())) {
+        InferStatisticsForReadTableIndexRanges(input, TypeCtx);
+    }
+    else if(TKqlReadTableBase::Match(input.Get()) || TKqlReadTableRangesBase::Match(input.Get())){
         InferStatisticsForReadTable(input, TypeCtx, KqpCtx);
     }
     else if(TKqlLookupTableBase::Match(input.Get())) {
@@ -252,6 +357,9 @@ bool TKqpStatisticsTransformer::BeforeLambdasSpecific(const TExprNode::TPtr& inp
     // Match a result binding atom and connect it to a stage
     else if(TCoParameter::Match(input.Get())) {
         InferStatisticsForResultBinding(input, TypeCtx, TxStats);
+    }
+    else if(TDqSourceWrapBase::Match(input.Get())) {
+        InferStatisticsForDqSourceWrap(input, TypeCtx, KqpCtx);
     }
     else {
         matched = false;

@@ -197,13 +197,13 @@ void ComputeStatistics(const std::shared_ptr<TJoinOptimizerNode>& join, IProvide
         ComputeStatistics(static_pointer_cast<TJoinOptimizerNode>(join->RightArg), ctx);
     }
     join->Stats = std::make_shared<TOptimizerStatistics>(
-        ComputeJoinStats(
+        ctx.ComputeJoinStats(
             *join->LeftArg->Stats, 
             *join->RightArg->Stats,
             join->LeftJoinKeys, 
             join->RightJoinKeys, 
-            EJoinAlgoType::GraceJoin, 
-            ctx
+            EJoinAlgoType::GraceJoin,
+            join->JoinType
         )
     );
 }
@@ -240,6 +240,7 @@ private:
         TDPHypSolver<TNodeSet> solver(hypergraph, this->Pctx);
 
         if (solver.CountCC(MaxDPhypTableSize_) >= MaxDPhypTableSize_) {
+            YQL_CLOG(TRACE, CoreDq) << "Maximum DPhyp threshold exceeded\n";
             ComputeStatistics(joinTree, this->Pctx);
             return joinTree;
         }
@@ -262,6 +263,19 @@ TExprBase DqOptimizeEquiJoinWithCosts(
     ui32 optLevel,
     IOptimizerNew& opt,
     const TProviderCollectFunction& providerCollect
+) {
+    int dummyEquiJoinCounter;
+    return DqOptimizeEquiJoinWithCosts(node, ctx, typesCtx, optLevel, opt, providerCollect, dummyEquiJoinCounter);
+}
+
+TExprBase DqOptimizeEquiJoinWithCosts(
+    const TExprBase& node,
+    TExprContext& ctx,
+    TTypeAnnotationContext& typesCtx,
+    ui32 optLevel,
+    IOptimizerNew& opt,
+    const TProviderCollectFunction& providerCollect,
+    int& equiJoinCounter
 ) {
     if (optLevel == 0) {
         return node;
@@ -291,6 +305,8 @@ TExprBase DqOptimizeEquiJoinWithCosts(
 
     YQL_CLOG(TRACE, CoreDq) << "All statistics for join in place";
 
+    equiJoinCounter++;
+
     auto joinTuple = equiJoin.Arg(equiJoin.ArgCount() - 2).Cast<TCoEquiJoinTuple>();
 
     // Generate an initial tree
@@ -304,6 +320,13 @@ TExprBase DqOptimizeEquiJoinWithCosts(
     }
 
     joinTree = opt.JoinSearch(joinTree);
+
+    if (NYql::NLog::YqlLogger().NeedToLog(NYql::NLog::EComponent::ProviderKqp, NYql::NLog::ELevel::TRACE)) {
+        std::stringstream str;
+        str << "Optimizied join tree:\n";
+        joinTree->Print(str);
+        YQL_CLOG(TRACE, CoreDq) << str.str();
+    }
 
     // rewrite the join tree and record the output statistics
     TExprBase res = RearrangeEquiJoinTree(ctx, equiJoin, joinTree);

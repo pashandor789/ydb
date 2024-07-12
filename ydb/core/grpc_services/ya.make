@@ -15,6 +15,7 @@ SRCS(
     resolve_local_db_table.cpp
     rpc_alter_coordination_node.cpp
     rpc_alter_table.cpp
+    rpc_backup.cpp
     rpc_begin_transaction.cpp
     rpc_calls.cpp
     rpc_cancel_operation.cpp
@@ -66,11 +67,13 @@ SRCS(
     rpc_read_rows.cpp
     rpc_remove_directory.cpp
     rpc_rename_tables.cpp
+    rpc_replication.cpp
     rpc_rollback_transaction.cpp
     rpc_scheme_base.cpp
     rpc_stream_execute_scan_query.cpp
     rpc_stream_execute_yql_script.cpp
     rpc_whoami.cpp
+    rpc_object_storage.cpp
     table_settings.cpp
 
     rpc_common/rpc_common_kqp_session.cpp
@@ -107,11 +110,11 @@ PEERDIR(
     ydb/core/grpc_services/counters
     ydb/core/grpc_services/local_rpc
     ydb/core/grpc_services/cancelation
-    ydb/core/grpc_services/auth_processor
     ydb/core/health_check
     ydb/core/io_formats/ydb_dump
     ydb/core/kesus/tablet
     ydb/core/kqp/common
+    ydb/core/kqp/session_actor
     ydb/core/protos
     ydb/core/scheme
     ydb/core/sys_view
@@ -119,9 +122,11 @@ PEERDIR(
     ydb/core/tx/datashard
     ydb/core/tx/sharding
     ydb/core/tx/data_events
+    ydb/core/tx/schemeshard/olap/bg_tasks/events
     ydb/core/util
     ydb/core/ydb_convert
     ydb/core/security
+    ydb/core/security/ldap_auth_provider
     ydb/library/aclib
     ydb/library/binary_json
     ydb/library/dynumber

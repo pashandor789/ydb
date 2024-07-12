@@ -6,12 +6,13 @@ import ydb.public.api.protos.ydb_value_pb2 as ydb
 from ydb.tests.tools.fq_runner.kikimr_utils import yq_v2
 
 from ydb.tests.tools.fq_runner.fq_client import FederatedQueryClient
-from utils.settings import Settings
+from ydb.tests.fq.generic.utils.settings import Settings
 
 
 class TestYdb:
     @yq_v2
     @pytest.mark.parametrize("fq_client", [{"folder_id": "my_folder"}], indirect=True)
+    @pytest.mark.parametrize("mvp_external_ydb_endpoint", [{"endpoint": "tests-fq-generic-ydb:2136"}], indirect=True)
     def test_simple(self, fq_client: FederatedQueryClient, settings: Settings):
         table_name = 'simple_table'
         conn_name = f'conn_{table_name}'

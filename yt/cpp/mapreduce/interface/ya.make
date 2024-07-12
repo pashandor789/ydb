@@ -11,6 +11,7 @@ SRCS(
     cypress.cpp
     errors.cpp
     format.cpp
+    helpers.cpp
     job_counters.cpp
     job_statistics.cpp
     io.cpp
@@ -44,4 +45,6 @@ GENERATE_ENUM_SERIALIZATION(protobuf_format.h)
 
 END()
 
-RECURSE_FOR_TESTS(ut)
+RECURSE_FOR_TESTS(
+    ut
+)
