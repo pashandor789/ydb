@@ -260,10 +260,12 @@ void InferStatisticsForFlatMap(const TExprNode::TPtr& input, TTypeAnnotationCont
 
         double selectivity = ComputePredicateSelectivity(flatmap.Lambda().Body(), inputStats);
 
-        auto outputStats = TOptimizerStatistics(inputStats->Type, inputStats->Nrows * selectivity, inputStats->Ncols, inputStats->ByteSize * selectivity, inputStats->Cost, inputStats->KeyColumns );
+        TOptimizerStatistics outputStats = *inputStats;
+        outputStats.Nrows *= selectivity
+        outputStats.ByteSize *= selectivity
         outputStats.Selectivity *= selectivity;
 
-        typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(std::move(outputStats)) );
+        typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(std::move(outputStats)));
     }
     else if (flatmap.Lambda().Body().Maybe<TCoMapJoinCore>() || 
             flatmap.Lambda().Body().Maybe<TCoMap>().Input().Maybe<TCoMapJoinCore>() ||
@@ -302,10 +304,12 @@ void InferStatisticsForFilter(const TExprNode::TPtr& input, TTypeAnnotationConte
     
     double selectivity = ComputePredicateSelectivity(filterBody, inputStats);
 
-    auto outputStats = TOptimizerStatistics(inputStats->Type, inputStats->Nrows * selectivity, inputStats->Ncols, inputStats->ByteSize * selectivity, inputStats->Cost, inputStats->KeyColumns);
+    TOptimizerStatistics outputStats = *inputStats;
+    outputStats.Nrows *= selectivity;
+    outputStats.ByteSize *= selectivity;
     outputStats.Selectivity *= selectivity;
 
-    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(std::move(outputStats)) );
+    typeCtx->SetStats(input.Get(), std::make_shared<TOptimizerStatistics>(std::move(outputStats)));
 }
 
 /**

@@ -362,6 +362,16 @@ struct TTypeAnnotationContext: public TThrRefBase {
      * Helper method to fetch statistics from type annotation context
      */
     std::shared_ptr<TOptimizerStatistics> GetStats(const TExprNode* input) {
+        static int kal = 0;
+        if (auto kek = StatisticsMap.Value(input, std::shared_ptr<TOptimizerStatistics>(nullptr))) {
+            if (kek->ColumnStatistics) {
+                ++kal;
+                int k = 2;
+                (void)k;
+                (void)kal;
+            }
+        }
+
         return StatisticsMap.Value(input, std::shared_ptr<TOptimizerStatistics>(nullptr));
     }
 
