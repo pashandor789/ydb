@@ -79,7 +79,7 @@ private:
         return TStatus::Ok;
     }
 
-    TStatus HandleAnalyze(TKiAnalyze node, TExprContext& ctx) override {
+    TStatus HandleAnalyze(TKiAnalyzeTable node, TExprContext& ctx) override {
         Y_UNUSED(ctx);
 
         auto cluster = node.DataSink().Cluster();
@@ -562,7 +562,7 @@ public:
             return true;
         }
 
-        if (node.IsCallable(TKiAnalyze::CallableName())) {
+        if (node.IsCallable(TKiAnalyzeTable::CallableName())) {
             return true;
         }
 
@@ -1020,7 +1020,7 @@ public:
                             .Ptr();
                     }
                 } else if (mode == "analyze") {
-                    return Build<TKiAnalyze>(ctx, node->Pos())
+                    return Build<TKiAnalyzeTable>(ctx, node->Pos())
                         .World(node->Child(0))
                         .DataSink(node->Child(1))
                         .Table().Build(key.GetTablePath())
@@ -1600,7 +1600,7 @@ IGraphTransformer::TStatus TKiSinkVisitorTransformer::DoTransform(TExprNode::TPt
         return HandleAlterSequence(node.Cast(), ctx);
     }
 
-    if (auto node = callable.Maybe<TKiAnalyze>()) {
+    if (auto node = callable.Maybe<TKiAnalyzeTable>()) {
         return HandleAnalyze(node.Cast(), ctx);
     }
 

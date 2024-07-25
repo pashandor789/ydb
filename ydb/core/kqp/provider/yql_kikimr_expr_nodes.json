@@ -496,7 +496,7 @@
             ]
         },
         {
-            "Name": "TKiAnalyze",
+            "Name": "TKiAnalyzeTable",
             "Base": "TCallable",
             "Match": {"Type": "Callable", "Name": "KiAnalyze!"},
             "Children": [

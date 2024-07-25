@@ -308,8 +308,8 @@ public:
                 break;
             }
 
-            case NKqpProto::TKqpSchemeOperation::kAnalyze: {
-                const auto& analyzeOperation = schemeOp.GetAnalyze();
+            case NKqpProto::TKqpSchemeOperation::kAnalyzeTable: {
+                const auto& analyzeOperation = schemeOp.GetAnalyzeTable();
                 
                 auto analyzePromise = NewPromise<IKqpGateway::TGenericResult>();
                 IActor* analyzeActor = new TAnalyzeActor(analyzeOperation.GetTablePath(), analyzePromise);

@@ -2092,7 +2092,7 @@ virtual TStatus HandleCreateTable(TKiCreateTable create, TExprContext& ctx) over
         return false;
     }
 
-    virtual TStatus HandleAnalyze(NNodes::TKiAnalyze node, TExprContext& ctx) override {
+    virtual TStatus HandleAnalyze(NNodes::TKiAnalyzeTable node, TExprContext& ctx) override {
         auto table = SessionCtx->Tables().EnsureTableExists(TString(node.DataSink().Cluster()), TString(node.Table().Value()), node.Pos(), ctx);
         if (!table) {
             return TStatus::Error;

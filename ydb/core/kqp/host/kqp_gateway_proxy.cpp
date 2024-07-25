@@ -2079,7 +2079,7 @@ public:
                 auto& phyTx = *phyQuery.AddTransactions();
                 phyTx.SetType(NKqpProto::TKqpPhyTx::TYPE_SCHEME);
 
-                phyTx.MutableSchemeOperation()->MutableAnalyze()->Swap(&analyzeTx);
+                phyTx.MutableSchemeOperation()->MutableAnalyzeTable()->Swap(&analyzeTx);
                 
                 TGenericResult result;
                 result.SetSuccess();

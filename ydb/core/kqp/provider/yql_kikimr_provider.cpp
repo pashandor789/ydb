@@ -73,7 +73,7 @@ struct TKikimrData {
         DataSinkNames.insert(TKiCreateSequence::CallableName());
         DataSinkNames.insert(TKiDropSequence::CallableName());
         DataSinkNames.insert(TKiAlterSequence::CallableName());
-        DataSinkNames.insert(TKiAnalyze::CallableName());
+        DataSinkNames.insert(TKiAnalyzeTable::CallableName());
 
         CommitModes.insert(CommitModeFlush);
         CommitModes.insert(CommitModeRollback);
@@ -91,8 +91,7 @@ struct TKikimrData {
             TYdbOperation::Delete |
             TYdbOperation::DeleteOn |
             TYdbOperation::InsertRevert |
-            TYdbOperation::InsertAbort |
-            TYdbOperation::Analyze;
+            TYdbOperation::InsertAbort;
 
         ReadOps =
             TYdbOperation::Select |

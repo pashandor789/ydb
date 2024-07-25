@@ -280,7 +280,7 @@ namespace {
         };
     }
 
-    TAnalyzeSettings ParseAnalyzeSettings(const TKiAnalyze& analyze) {
+    TAnalyzeSettings ParseAnalyzeSettings(const TKiAnalyzeTable& analyze) {
         return TAnalyzeSettings{
             .TablePath = TString(analyze.Table())
         };
@@ -2372,7 +2372,7 @@ public:
             }
         }
 
-        if (auto maybeAnalyze = TMaybeNode<TKiAnalyze>(input)) {
+        if (auto maybeAnalyze = TMaybeNode<TKiAnalyzeTable>(input)) {
             auto cluster = TString(maybeAnalyze.Cast().DataSink().Cluster());
 
             TAnalyzeSettings analyzeSettings = ParseAnalyzeSettings(maybeAnalyze.Cast());
