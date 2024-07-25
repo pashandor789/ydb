@@ -43,9 +43,22 @@ void TAnalyzeActor::Handle(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr&
     auto& entry = navigate->ResultSet.front();
 
     if (entry.Status != TNavigate::EStatus::Ok) {
+        NYql::EYqlIssueCode error;
+        switch (entry.Status) {
+            case TNavigate::EStatus::PathErrorUnknown:
+            case TNavigate::EStatus::RootUnknown:
+            case TNavigate::EStatus::PathNotTable:
+            case TNavigate::EStatus::TableCreationNotComplete:
+                error = NYql::TIssuesIds::KIKIMR_SCHEME_ERROR;
+            case TNavigate::EStatus::LookupError:
+            case TNavigate::EStatus::RedirectLookupError:
+                error = NYql::TIssuesIds::KIKIMR_TEMPORARILY_UNAVAILABLE;
+            default:
+                error = NYql::TIssuesIds::DEFAULT_ERROR;
+        }
         Promise.SetValue(
             NYql::NCommon::ResultFromIssues<NYql::IKikimrGateway::TGenericResult>(
-                NYql::TIssuesIds::KIKIMR_TEMPORARILY_UNAVAILABLE,
+                error,
                 TStringBuilder() << "Can't get statistics aggregator ID. " << entry.Status, 
                 {}
             )
@@ -60,7 +73,7 @@ void TAnalyzeActor::Handle(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr&
         } else {
             Promise.SetValue(
                 NYql::NCommon::ResultFromIssues<NYql::IKikimrGateway::TGenericResult>(
-                    NYql::TIssuesIds::KIKIMR_TEMPORARILY_UNAVAILABLE,
+                    NYql::TIssuesIds::DEFAULT_ERROR,
                     TStringBuilder() << "Can't get statistics aggregator ID.", {}
                 )
             );
