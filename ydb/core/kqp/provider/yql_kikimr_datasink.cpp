@@ -83,9 +83,11 @@ private:
         Y_UNUSED(ctx);
 
         auto cluster = node.DataSink().Cluster();
-        auto table = node.Table();
+        for (const auto& table: node.Tables()) {
+            SessionCtx->Tables().GetOrAddTable(TString(cluster), SessionCtx->GetDatabase(), table.StringValue());
+        }
 
-        SessionCtx->Tables().GetOrAddTable(TString(cluster), SessionCtx->GetDatabase(), TString(table));
+        node.Ptr()->SetTypeAnn(node.World().Ref().GetTypeAnn());
         return TStatus::Ok;
     }
 
@@ -285,9 +287,6 @@ private:
                     }
                     SessionCtx->Tables().GetOrAddTable(TString(cluster), SessionCtx->GetDatabase(), key.GetTablePath());
                     return TStatus::Ok;
-                } else if (mode == "analyze") {
-                    SessionCtx->Tables().GetOrAddTable(TString(cluster), SessionCtx->GetDatabase(), key.GetTablePath());
-                    return TStatus::Ok;
                 } else {
                     ctx.AddError(TIssue(ctx.GetPosition(node.Pos()), TStringBuilder()
                         << "Unsupported Kikimr table write mode: " << settings.Mode.Cast().Value()));
@@ -353,6 +352,20 @@ private:
                 return TStatus::Ok;
             case TKikimrKey::Type::Replication:
                 return TStatus::Ok;
+            case TKikimrKey::Type::Tables: {
+                NCommon::TWriteTableSettings settings = NCommon::ParseWriteTableSettings(TExprList(node.Ref().ChildPtr(4)), ctx);
+                YQL_ENSURE(settings.Mode);
+                auto mode = settings.Mode.Cast();
+
+                if (mode == "analyze") {
+                    for (const auto& tablePath: key.GetTables()) {
+                        SessionCtx->Tables().GetOrAddTable(TString(cluster), SessionCtx->GetDatabase(), tablePath);
+                    }
+                    return TStatus::Ok;
+                }
+
+                YQL_ENSURE(false, "unknown Tables mode \"" << TString(mode) << "\"");
+            }
         }
 
         ctx.AddError(TIssue(ctx.GetPosition(node.Pos()), "Invalid table key type."));
@@ -1019,13 +1032,6 @@ public:
                             .Done()
                             .Ptr();
                     }
-                } else if (mode == "analyze") {
-                    return Build<TKiAnalyzeTable>(ctx, node->Pos())
-                        .World(node->Child(0))
-                        .DataSink(node->Child(1))
-                        .Table().Build(key.GetTablePath())
-                        .Done()
-                        .Ptr();
                 } else {
                     return Build<TKiWriteTable>(ctx, node->Pos())
                         .World(node->Child(0))
@@ -1414,6 +1420,39 @@ public:
                     return nullptr;
                 }
                 break;
+            }
+            case TKikimrKey::Type::Tables: {
+                NCommon::TWriteTableSettings settings = NCommon::ParseWriteTableSettings(TExprList(node->Child(4)), ctx);
+                YQL_ENSURE(settings.Mode);
+                auto mode = settings.Mode.Cast();
+
+                if (mode == "analyze") {
+                    auto dataSinkNode = node->Child(1);
+                    TKiDataSink dataSink(dataSinkNode);
+
+                    auto tableList = Build<TCoAtomList>(ctx, node->Pos());
+                    for (const auto& tablePath: key.GetTables()) {
+                        auto table = SessionCtx->Tables().EnsureTableExists(
+                            TString(dataSink.Cluster()),
+                            tablePath, node->Pos(), ctx
+                        );
+                        if (table == nullptr) {
+                            return nullptr;
+                        }
+
+                        tableList.Add(Build<TCoAtom>(ctx, node->Pos()).Value(tablePath).Done());
+                    }
+                    
+                    return
+                        Build<TKiAnalyzeTable>(ctx, node->Pos())
+                            .World(node->Child(0))
+                            .DataSink(node->Child(1))
+                            .Tables(tableList.Done())
+                            .Done()
+                            .Ptr();
+                }
+
+                YQL_ENSURE(false, "unknown Tables mode \"" << TString(mode) << "\"");
             }
         }
 

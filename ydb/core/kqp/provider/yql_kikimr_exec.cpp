@@ -281,8 +281,13 @@ namespace {
     }
 
     TAnalyzeSettings ParseAnalyzeSettings(const TKiAnalyzeTable& analyze) {
+        TVector<TString> tables;
+        for (const auto& table: analyze.Tables()) {
+            tables.push_back(TString(table));
+        }
+
         return TAnalyzeSettings{
-            .TablePath = TString(analyze.Table())
+            .Tables = std::move(tables)
         };
     }
 

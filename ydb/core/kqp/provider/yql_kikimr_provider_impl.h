@@ -89,6 +89,7 @@ public:
         Permission,
         PGObject,
         Replication,
+        Tables
     };
 
     struct TViewDescription {
@@ -171,6 +172,12 @@ public:
         return *ObjectType;
     }
 
+    const TVector<TString>& GetTables() const {
+        Y_DEBUG_ABORT_UNLESS(KeyType.Defined());
+        Y_DEBUG_ABORT_UNLESS(KeyType == Type::Tables);
+        return Tables;
+    }
+
     bool Extract(const TExprNode& key);
 
 private:
@@ -179,6 +186,7 @@ private:
     TString Target;
     TMaybe<TString> ObjectType;
     TMaybe<TViewDescription> View;
+    TVector<TString> Tables;
 };
 
 struct TKiDataQueryBlockSettings {

@@ -223,6 +223,10 @@ private:
             {
                 return TStatus::Ok;
             }
+            case TKikimrKey::Type::Tables:
+            {
+                return TStatus::Ok;
+            }
         }
 
         return TStatus::Error;
@@ -2093,11 +2097,13 @@ virtual TStatus HandleCreateTable(TKiCreateTable create, TExprContext& ctx) over
     }
 
     virtual TStatus HandleAnalyze(NNodes::TKiAnalyzeTable node, TExprContext& ctx) override {
-        auto table = SessionCtx->Tables().EnsureTableExists(TString(node.DataSink().Cluster()), TString(node.Table().Value()), node.Pos(), ctx);
-        if (!table) {
-            return TStatus::Error;
+        Y_UNUSED(ctx);
+
+        auto cluster = node.DataSink().Cluster();
+        for (const auto& table: node.Tables()) {
+            SessionCtx->Tables().GetOrAddTable(TString(cluster), SessionCtx->GetDatabase(), table.StringValue());
         }
-    
+
         node.Ptr()->SetTypeAnn(node.World().Ref().GetTypeAnn());
         return TStatus::Ok;
     }

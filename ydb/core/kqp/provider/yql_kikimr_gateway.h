@@ -818,7 +818,7 @@ struct TDropReplicationSettings {
 };
 
 struct TAnalyzeSettings {
-    TString TablePath;
+    TVector<TString> Tables;
 };
 
 struct TKikimrListPathItem {

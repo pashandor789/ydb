@@ -2072,7 +2072,12 @@ public:
 
         try {
             NKqpProto::TKqpAnalyzeOperation analyzeTx;
-            analyzeTx.SetTablePath(settings.TablePath);
+
+            if (settings.Tables.size() > 1) {
+                return MakeFuture(ResultFromError<TGenericResult>("Multi table Analyze hasn't implemented yet"));
+            }
+
+            analyzeTx.SetTablePath(settings.Tables[0]);
 
             if (IsPrepare()) {
                 auto& phyQuery = *SessionCtx->Query().PreparingQuery->MutablePhysicalQuery();

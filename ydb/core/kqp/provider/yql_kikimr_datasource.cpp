@@ -163,6 +163,13 @@ private:
                 return TStatus::Ok;
             case TKikimrKey::Type::Replication:
                 return TStatus::Ok;
+            case TKikimrKey::Type::Tables: {
+                for (const auto& tablePath: key.GetTables()) {
+                    SessionCtx->Tables().GetOrAddTable(TString(cluster), SessionCtx->GetDatabase(), tablePath);
+                }
+
+                return TStatus::Ok;
+            }
         }
 
         return TStatus::Error;
