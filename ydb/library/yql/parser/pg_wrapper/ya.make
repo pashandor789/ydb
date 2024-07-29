@@ -100,6 +100,13 @@ PEERDIR(
 
 INCLUDE(cflags.inc)
 
+IF (OS_LINUX)
+    SRCS(
+        postgresql/src/port/strlcat.c
+        postgresql/src/port/strlcpy.c
+    )
+ENDIF()
+
 IF (OS_LINUX OR OS_DARWIN)
     SRCS(
         postgresql/src/backend/port/posix_sema.c
@@ -119,23 +126,23 @@ ELSEIF (OS_WINDOWS)
         postgresql/src/backend/port/win32_sema.c
         postgresql/src/backend/port/win32_shmem.c
         postgresql/src/port/dirmod.c
-        postgresql/src/port/dlopen.c
-        postgresql/src/port/getaddrinfo.c
         postgresql/src/port/getopt.c
-        postgresql/src/port/getrusage.c
-        postgresql/src/port/gettimeofday.c
         postgresql/src/port/inet_aton.c
         postgresql/src/port/kill.c
         postgresql/src/port/open.c
-        postgresql/src/port/pread.c
-        postgresql/src/port/pwrite.c
         postgresql/src/port/pwritev.c
         postgresql/src/port/system.c
         postgresql/src/port/win32common.c
+        postgresql/src/port/win32dlopen.c
         postgresql/src/port/win32env.c
         postgresql/src/port/win32error.c
         postgresql/src/port/win32fseek.c
+        postgresql/src/port/win32gai_strerror.c
+        postgresql/src/port/win32gettimeofday.c
+        postgresql/src/port/win32getrusage.c
         postgresql/src/port/win32ntdll.c
+        postgresql/src/port/win32pread.c
+        postgresql/src/port/win32pwrite.c
         postgresql/src/port/win32security.c
         postgresql/src/port/win32setlocale.c
         postgresql/src/port/win32stat.c

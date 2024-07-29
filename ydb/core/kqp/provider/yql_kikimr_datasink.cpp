@@ -79,6 +79,18 @@ private:
         return TStatus::Ok;
     }
 
+    TStatus HandleAnalyze(TKiAnalyzeTable node, TExprContext& ctx) override {
+        Y_UNUSED(ctx);
+
+        auto cluster = node.DataSink().Cluster();
+        for (const auto& table: node.Tables()) {
+            SessionCtx->Tables().GetOrAddTable(TString(cluster), SessionCtx->GetDatabase(), table.StringValue());
+        }
+
+        node.Ptr()->SetTypeAnn(node.World().Ref().GetTypeAnn());
+        return TStatus::Ok;
+    }
+
     TStatus HandleCreateTopic(TKiCreateTopic node, TExprContext& ctx) override {
         Y_UNUSED(ctx);
         Y_UNUSED(node);
@@ -340,6 +352,20 @@ private:
                 return TStatus::Ok;
             case TKikimrKey::Type::Replication:
                 return TStatus::Ok;
+            case TKikimrKey::Type::Tables: {
+                NCommon::TWriteTableSettings settings = NCommon::ParseWriteTableSettings(TExprList(node.Ref().ChildPtr(4)), ctx);
+                YQL_ENSURE(settings.Mode);
+                auto mode = settings.Mode.Cast();
+
+                if (mode == "analyze") {
+                    for (const auto& tablePath: key.GetTables()) {
+                        SessionCtx->Tables().GetOrAddTable(TString(cluster), SessionCtx->GetDatabase(), tablePath);
+                    }
+                    return TStatus::Ok;
+                }
+
+                YQL_ENSURE(false, "unknown Tables mode \"" << TString(mode) << "\"");
+            }
         }
 
         ctx.AddError(TIssue(ctx.GetPosition(node.Pos()), "Invalid table key type."));
@@ -546,6 +572,10 @@ public:
         }
 
         if(node.IsCallable(TPgDropObject::CallableName())) {
+            return true;
+        }
+
+        if (node.IsCallable(TKiAnalyzeTable::CallableName())) {
             return true;
         }
 
@@ -772,10 +802,15 @@ public:
             return nullptr;
         }
 
+        auto valueType = settings.ValueType.IsValid()
+            ? settings.ValueType.Cast()
+            : Build<TCoAtom>(ctx, node->Pos()).Value("Null").Done();
+
         return Build<TKiAlterSequence>(ctx, node->Pos())
             .World(node->Child(0))
             .DataSink(node->Child(1))
             .Sequence().Build(key.GetPGObjectId())
+            .ValueType(valueType)
             .SequenceSettings(settings.SequenceSettings.Cast())
             .Settings(settings.Other)
             .MissingOk<TCoAtom>()
@@ -1161,7 +1196,7 @@ public:
                         .Topic().Build(key.GetTopicPath())
                         .Settings(settings.Other)
                         .Done()
-                        .Ptr();
+                        .Ptr(); 
                 } else {
                     ctx.AddError(TIssue(ctx.GetPosition(node->Pos()), "Unknown operation type for topic"));
                     return nullptr;
@@ -1386,6 +1421,39 @@ public:
                 }
                 break;
             }
+            case TKikimrKey::Type::Tables: {
+                NCommon::TWriteTableSettings settings = NCommon::ParseWriteTableSettings(TExprList(node->Child(4)), ctx);
+                YQL_ENSURE(settings.Mode);
+                auto mode = settings.Mode.Cast();
+
+                if (mode == "analyze") {
+                    auto dataSinkNode = node->Child(1);
+                    TKiDataSink dataSink(dataSinkNode);
+
+                    auto tableList = Build<TCoAtomList>(ctx, node->Pos());
+                    for (const auto& tablePath: key.GetTables()) {
+                        auto table = SessionCtx->Tables().EnsureTableExists(
+                            TString(dataSink.Cluster()),
+                            tablePath, node->Pos(), ctx
+                        );
+                        if (table == nullptr) {
+                            return nullptr;
+                        }
+
+                        tableList.Add(Build<TCoAtom>(ctx, node->Pos()).Value(tablePath).Done());
+                    }
+                    
+                    return
+                        Build<TKiAnalyzeTable>(ctx, node->Pos())
+                            .World(node->Child(0))
+                            .DataSink(node->Child(1))
+                            .Tables(tableList.Done())
+                            .Done()
+                            .Ptr();
+                }
+
+                YQL_ENSURE(false, "unknown Tables mode \"" << TString(mode) << "\"");
+            }
         }
 
         ctx.AddError(TIssue(ctx.GetPosition(node->Pos()), "Failed to rewrite IO."));
@@ -1569,6 +1637,10 @@ IGraphTransformer::TStatus TKiSinkVisitorTransformer::DoTransform(TExprNode::TPt
 
     if (auto node = callable.Maybe<TKiAlterSequence>()) {
         return HandleAlterSequence(node.Cast(), ctx);
+    }
+
+    if (auto node = callable.Maybe<TKiAnalyzeTable>()) {
+        return HandleAnalyze(node.Cast(), ctx);
     }
 
     ctx.AddError(TIssue(ctx.GetPosition(input->Pos()), TStringBuilder() << "(Kikimr DataSink) Unsupported function: "

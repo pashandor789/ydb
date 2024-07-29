@@ -14,6 +14,8 @@
 
 #include <ydb/core/protos/console_config.pb.h>
 
+#include <ydb/library/actors/interconnect/interconnect.h>
+
 
 namespace NKikimr::NKqp {
 
@@ -34,7 +36,8 @@ class TKqpWorkloadService : public TActorBootstrapped<TKqpWorkloadService> {
 
     enum class EWakeUp {
         IdleCheck,
-        StartCpuLoadRequest
+        StartCpuLoadRequest,
+        StartNodeInfoRequest
     };
 
 public:
@@ -55,6 +58,7 @@ public:
         CpuQuotaManager = std::make_unique<TCpuQuotaManagerState>(ActorContext(), Counters->GetSubgroup("subcomponent", "CpuQuotaManager"));
 
         EnabledResourcePools = AppData()->FeatureFlags.GetEnableResourcePools();
+        EnabledResourcePoolsOnServerless = AppData()->FeatureFlags.GetEnableResourcePoolsOnServerless();
         if (EnabledResourcePools) {
             InitializeWorkloadService();
         }
@@ -81,6 +85,7 @@ public:
         const auto& event = ev->Get()->Record;
 
         EnabledResourcePools = event.GetConfig().GetFeatureFlags().GetEnableResourcePools();
+        EnabledResourcePoolsOnServerless = event.GetConfig().GetFeatureFlags().GetEnableResourcePoolsOnServerless();
         if (EnabledResourcePools) {
             LOG_I("Resource pools was enanbled");
             InitializeWorkloadService();
@@ -92,6 +97,13 @@ public:
         Send(ev->Sender, responseEvent.release(), IEventHandle::FlagTrackDelivery, ev->Cookie);
     }
 
+    void Handle(TEvInterconnect::TEvNodesInfo::TPtr& ev) {
+        NodeCount = ev->Get()->Nodes.size();
+        ScheduleNodeInfoRequest();
+
+        LOG_T("Updated node info, noode count: " << NodeCount);
+    }
+
     void Handle(TEvents::TEvUndelivered::TPtr& ev) const {
         switch (ev->Get()->SourceType) {
             case NConsole::TEvConfigsDispatcher::EvSetConfigSubscriptionRequest:
@@ -100,6 +112,11 @@ public:
 
             case NConsole::TEvConsole::EvConfigNotificationResponse:
                 LOG_E("Failed to deliver config notification response");
+                break;
+
+            case TEvInterconnect::EvListNodes:
+                LOG_W("Failed to deliver list nodes request");
+                ScheduleNodeInfoRequest();
                 break;
 
             default:
@@ -115,12 +132,9 @@ public:
             return;
         }
 
-        // Add AllAuthenticatedUsers group SID into user token
-        ev->Get()->UserToken = GetUserToken(ev->Get()->UserToken);
-
         LOG_D("Recieved new request from " << workerActorId << ", Database: " << ev->Get()->Database << ", PoolId: " << ev->Get()->PoolId << ", SessionId: " << ev->Get()->SessionId);
         bool hasDefaultPool = DatabasesWithDefaultPool.contains(CanonizePath(ev->Get()->Database));
-        Register(CreatePoolResolverActor(std::move(ev), hasDefaultPool));
+        Register(CreatePoolResolverActor(std::move(ev), hasDefaultPool, EnabledResourcePoolsOnServerless));
     }
 
     void Handle(TEvCleanupRequest::TPtr& ev) {
@@ -145,6 +159,10 @@ public:
             case EWakeUp::StartCpuLoadRequest:
                 RunCpuLoadRequest();
                 break;
+
+            case EWakeUp::StartNodeInfoRequest:
+                RunNodeInfoRequest();
+                break;
         }
     }
 
@@ -152,6 +170,7 @@ public:
         sFunc(TEvents::TEvPoison, HandlePoison);
         sFunc(NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse, HandleSetConfigSubscriptionResponse);
         hFunc(NConsole::TEvConsole::TEvConfigNotificationRequest, Handle);
+        hFunc(TEvInterconnect::TEvNodesInfo, Handle);
         hFunc(TEvents::TEvUndelivered, Handle);
 
         hFunc(TEvPlaceRequestIntoPool, Handle);
@@ -160,6 +179,7 @@ public:
 
         hFunc(TEvPrivate::TEvResolvePoolResponse, Handle);
         hFunc(TEvPrivate::TEvPlaceRequestIntoPoolResponse, Handle);
+        hFunc(TEvPrivate::TEvNodesInfoRequest, Handle);
         hFunc(TEvPrivate::TEvRefreshPoolState, Handle);
         hFunc(TEvPrivate::TEvCpuQuotaRequest, Handle);
         hFunc(TEvPrivate::TEvFinishRequestInPool, Handle);
@@ -212,6 +232,10 @@ private:
             poolState->UpdateHandler();
             poolState->StartPlaceRequest();
         }
+    }
+
+    void Handle(TEvPrivate::TEvNodesInfoRequest::TPtr& ev) const {
+        Send(ev->Sender, new TEvPrivate::TEvNodesInfoResponse(NodeCount));
     }
 
     void Handle(TEvPrivate::TEvRefreshPoolState::TPtr& ev) {
@@ -333,6 +357,7 @@ private:
 
         LOG_I("Started workload service initialization");
         Register(CreateCleanupTablesActor());
+        RunNodeInfoRequest();
     }
 
     void PrepareWorkloadServiceTables() {
@@ -420,6 +445,14 @@ private:
         Register(CreateCpuLoadFetcherActor(SelfId()));
     }
 
+    void ScheduleNodeInfoRequest() const {
+        Schedule(IDLE_DURATION * 2, new TEvents::TEvWakeup(static_cast<ui64>(EWakeUp::StartCpuLoadRequest)));
+    }
+
+    void RunNodeInfoRequest() const {
+        Send(GetNameserviceActorId(), new TEvInterconnect::TEvListNodes(), IEventHandle::FlagTrackDelivery);
+    }
+
 private:
     void ReplyContinueError(const TActorId& replyActorId, Ydb::StatusIds::StatusCode status, const TString& message) const {
         ReplyContinueError(replyActorId, status, {NYql::TIssue(message)});
@@ -437,25 +470,6 @@ private:
     void ReplyCleanupError(const TActorId& replyActorId, Ydb::StatusIds::StatusCode status, const TString& message) const {
         LOG_W("Reply cleanup error " << status << " to " << replyActorId << ": " << message);
         Send(replyActorId, new TEvCleanupResponse(status, {NYql::TIssue(message)}));
-    }
-
-    static TIntrusivePtr<NACLib::TUserToken> GetUserToken(TIntrusiveConstPtr<NACLib::TUserToken> userToken) {
-        auto token = MakeIntrusive<NACLib::TUserToken>(userToken ? userToken->GetUserSID() : NACLib::TSID(), TVector<NACLib::TSID>{});
-
-        bool hasAllAuthenticatedUsersSID = false;
-        const auto& allAuthenticatedUsersSID = AppData()->AllAuthenticatedUsers;
-        if (userToken) {
-            for (const auto& groupSID : userToken->GetGroupSIDs()) {
-                token->AddGroupSID(groupSID);
-                hasAllAuthenticatedUsersSID = hasAllAuthenticatedUsersSID || groupSID == allAuthenticatedUsersSID;
-            }
-        }
-
-        if (!hasAllAuthenticatedUsersSID) {
-            token->AddGroupSID(allAuthenticatedUsersSID);
-        }
-
-        return token;
     }
 
     TPoolState* GetPoolState(const TString& database, const TString& poolId) {
@@ -486,6 +500,7 @@ private:
     NMonitoring::TDynamicCounterPtr Counters;
 
     bool EnabledResourcePools = false;
+    bool EnabledResourcePoolsOnServerless = false;
     bool ServiceInitialized = false;
     bool IdleChecksStarted = false;
     ETablesCreationStatus TablesCreationStatus = ETablesCreationStatus::Cleanup;
@@ -494,6 +509,7 @@ private:
     std::unordered_set<TString> DatabasesWithDefaultPool;
     std::unordered_map<TString, TPoolState> PoolIdToState;
     std::unique_ptr<TCpuQuotaManagerState> CpuQuotaManager;
+    ui32 NodeCount = 0;
 
     NMonitoring::TDynamicCounters::TCounterPtr ActivePools;
 };

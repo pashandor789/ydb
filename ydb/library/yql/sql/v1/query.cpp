@@ -149,6 +149,8 @@ static INode::TPtr CreateIndexType(TIndexDescription::EType type, const INode& n
             return node.Q("asyncGlobal");
         case TIndexDescription::EType::GlobalSyncUnique:
             return node.Q("syncGlobalUnique");
+        case TIndexDescription::EType::GlobalVectorKmeansTree:
+            return node.Q("globalVectorKmeansTree");
     }
 }
 
@@ -270,6 +272,28 @@ static INode::TPtr CreateTableSettings(const TTableSettings& tableSettings, ETab
     return settings;
 }
 
+static INode::TPtr CreateVectorIndexSettings(const TVectorIndexSettings& vectorIndexSettings, const INode& node) {
+    // short aliases for member function calls
+    auto Y = [&node](auto&&... args) { return node.Y(std::forward<decltype(args)>(args)...); };
+    auto Q = [&node](auto&&... args) { return node.Q(std::forward<decltype(args)>(args)...); };
+    auto L = [&node](auto&&... args) { return node.L(std::forward<decltype(args)>(args)...); };
+
+    auto settings = Y();
+
+    if (const auto* distance = std::get_if<TVectorIndexSettings::EDistance>(&vectorIndexSettings.Metric)) {
+        settings = L(settings, Q(Y(Q("distance"), Q(ToString(*distance)))));
+    } else if (const auto* similarity = std::get_if<TVectorIndexSettings::ESimilarity>(&vectorIndexSettings.Metric)) {
+        settings = L(settings, Q(Y(Q("similarity"), Q(ToString(*similarity)))));
+    } else {
+        Y_ENSURE(false, "Metric should be set");
+    }
+
+    settings = L(settings, Q(Y(Q("vector_type"), Q(ToString(*vectorIndexSettings.VectorType)))));
+    settings = L(settings, Q(Y(Q("vector_dimension"), Q(ToString(*vectorIndexSettings.VectorDimension)))));
+    
+    return settings;
+}
+
 static INode::TPtr CreateIndexDesc(const TIndexDescription& index, ETableSettingsParsingMode parsingMode, const INode& node) {
     auto indexColumns = node.Y();
     for (const auto& col : index.IndexColumns) {
@@ -293,6 +317,12 @@ static INode::TPtr CreateIndexDesc(const TIndexDescription& index, ETableSetting
             node.Q(CreateTableSettings(index.TableSettings, parsingMode, node))
         );
         indexNode = node.L(indexNode, tableSettings);
+    }
+    if (const auto* indexSettingsPtr = std::get_if<TVectorIndexSettings>(&index.IndexSettings)) {
+        const auto& indexSettings = node.Q(node.Y(
+            node.Q("indexSettings"), 
+            node.Q(CreateVectorIndexSettings(*indexSettingsPtr, node))));
+        indexNode = node.L(indexNode, indexSettings);
     }
     return indexNode;
 }
@@ -1329,15 +1359,31 @@ public:
         if (Params.AlterColumns) {
             auto columns = Y();
             for (auto& col : Params.AlterColumns) {
-                auto columnDesc = Y();
-                columnDesc = L(columnDesc, BuildQuotedAtom(Pos, col.Name));
-                auto familiesDesc = Y();
-                for (const auto& family : col.Families) {
-                    familiesDesc = L(familiesDesc, BuildQuotedAtom(family.Pos, family.Name));
-                }
+                if (col.TypeOfChange == TColumnSchema::ETypeOfChange::DropNotNullConstraint) {
+                    auto columnDesc = Y();
+                    columnDesc = L(columnDesc, BuildQuotedAtom(Pos, col.Name));
 
-                columnDesc = L(columnDesc, Q(Y(Q("setFamily"), Q(familiesDesc))));
-                columns = L(columns, Q(columnDesc));
+                    auto columnConstraints = Y();
+                    columnConstraints = L(columnConstraints, Q(Y(Q("drop_not_null"))));
+                    columnDesc = L(columnDesc, Q(Y(Q("changeColumnConstraints"), Q(columnConstraints))));
+                    columns = L(columns, Q(columnDesc));
+                } else if (col.TypeOfChange == TColumnSchema::ETypeOfChange::SetNotNullConstraint) {
+                    // todo flown4qqqq
+                } else if (col.TypeOfChange == TColumnSchema::ETypeOfChange::SetFamily) {
+                    auto columnDesc = Y();
+                    columnDesc = L(columnDesc, BuildQuotedAtom(Pos, col.Name));
+                    auto familiesDesc = Y();
+                    for (const auto& family : col.Families) {
+                        familiesDesc = L(familiesDesc, BuildQuotedAtom(family.Pos, family.Name));
+                    }
+
+                    columnDesc = L(columnDesc, Q(Y(Q("setFamily"), Q(familiesDesc))));
+                    columns = L(columns, Q(columnDesc));
+                } else if (col.TypeOfChange == TColumnSchema::ETypeOfChange::Nothing) {
+                    // do nothing
+                } else {
+                    ctx.Error(Pos) << " action is not supported";
+                }
             }
             actions = L(actions, Q(Y(Q("alterColumns"), Q(columns))));
         }
@@ -3141,4 +3187,47 @@ private:
 TNodePtr BuildWorldForNode(TPosition pos, TNodePtr list, TNodePtr bodyNode, TNodePtr elseNode, bool isEvaluate, bool isParallel) {
     return new TWorldFor(pos, list, bodyNode, elseNode, isEvaluate, isParallel);
 }
+
+class TAnalyzeNode final: public TAstListNode {
+public:
+    TAnalyzeNode(TPosition pos, const TTableRef& tr, TScopedStatePtr scoped)
+        : TAstListNode(pos)
+        , Table(tr)
+        , Scoped(scoped)
+    {
+        FakeSource = BuildFakeSource(pos);
+        scoped->UseCluster(Table.Service, Table.Cluster);
+    }
+
+    bool DoInit(TContext& ctx, ISource* src) override {
+        Y_UNUSED(src);
+        auto keys = Table.Keys->GetTableKeys()->BuildKeys(ctx, ITableKeys::EBuildKeysMode::DROP);
+        if (!keys || !keys->Init(ctx, FakeSource.Get())) {
+            return false;
+        }
+
+        auto opts = Y();
+        opts = L(opts, Q(Y(Q("mode"), Q("analyze"))));
+        Add("block", Q(Y(
+            Y("let", "sink", Y("DataSink", BuildQuotedAtom(Pos, Table.Service), Scoped->WrapCluster(Table.Cluster, ctx))),
+            Y("let", "world", Y(TString(WriteName), "world", "sink", keys, Y("Void"), Q(opts))),
+            Y("return", ctx.PragmaAutoCommit ? Y(TString(CommitName), "world", "sink") : AstNode("world"))
+        )));
+
+        return TAstListNode::DoInit(ctx, FakeSource.Get());
+    }
+
+    TPtr DoClone() const final {
+        return {};
+    }
+private:
+    TTableRef Table;
+    TScopedStatePtr Scoped;
+    TSourcePtr FakeSource;
+};
+
+TNodePtr BuildAnalyze(TPosition pos, const TTableRef& tr, TScopedStatePtr scoped) {
+    return new TAnalyzeNode(pos, tr, scoped);
+}
+
 } // namespace NSQLTranslationV1
