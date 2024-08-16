@@ -68,6 +68,7 @@ class KiKiMRNode(daemon.Daemon, kikimr_node_interface.NodeInterface):
         self.mon_port = port_allocator.mon_port
         self.ic_port = port_allocator.ic_port
         self.grpc_ssl_port = port_allocator.grpc_ssl_port
+        self.pgwire_port = port_allocator.pgwire_port
         self.sqs_port = None
         if configurator.sqs_service_enabled:
             self.sqs_port = port_allocator.sqs_port
@@ -77,10 +78,15 @@ class KiKiMRNode(daemon.Daemon, kikimr_node_interface.NodeInterface):
 
         if configurator.use_log_files:
             self.__log_file = tempfile.NamedTemporaryFile(dir=self.cwd, prefix="logfile_", suffix=".log", delete=False)
+            kwargs = {}
         else:
             self.__log_file = None
+            kwargs = {
+                "stdout_file": "/dev/stdout",
+                "stderr_file": "/dev/stderr"
+                }
 
-        daemon.Daemon.__init__(self, self.command, cwd=self.cwd, timeout=180, stderr_on_error_lines=240)
+        daemon.Daemon.__init__(self, self.command, cwd=self.cwd, timeout=180, stderr_on_error_lines=240, **kwargs)
         self.__binary_path = None
 
     @property
@@ -174,6 +180,9 @@ class KiKiMRNode(daemon.Daemon, kikimr_node_interface.NodeInterface):
                 "--ic-port=%d" % self.ic_port,
             ]
         )
+
+        if os.environ.get("YDB_ALLOCATE_PGWIRE_PORT", "") == "true":
+            command.append("--pgwire-port=%d" % self.pgwire_port)
 
         if self.__encryption_key is not None:
             command.extend(["--key-file", self.__encryption_key])

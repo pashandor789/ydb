@@ -22,6 +22,80 @@ template <typename TDerived>
 class TPoolHandlerActorBase : public TActor<TDerived> {
     using TBase = TActor<TDerived>;
 
+    struct TCommonCounters {
+        const NMonitoring::TDynamicCounterPtr CountersRoot;
+        const NMonitoring::TDynamicCounterPtr CountersSubgroup;
+
+        // Workload service counters
+        NMonitoring::TDynamicCounters::TCounterPtr ActivePoolHandlers;
+
+        // Pool counters
+        NMonitoring::TDynamicCounters::TCounterPtr LocalInFly;
+        NMonitoring::TDynamicCounters::TCounterPtr LocalDelayedRequests;
+        NMonitoring::TDynamicCounters::TCounterPtr ContinueOk;
+        NMonitoring::TDynamicCounters::TCounterPtr ContinueOverloaded;
+        NMonitoring::TDynamicCounters::TCounterPtr ContinueError;
+        NMonitoring::TDynamicCounters::TCounterPtr CleanupOk;
+        NMonitoring::TDynamicCounters::TCounterPtr CleanupError;
+        NMonitoring::TDynamicCounters::TCounterPtr Cancelled;
+        NMonitoring::THistogramPtr DelayedTimeMs;
+        NMonitoring::THistogramPtr RequestsLatencyMs;
+
+        // Config counters
+        NMonitoring::TDynamicCounters::TCounterPtr InFlightLimit;
+        NMonitoring::TDynamicCounters::TCounterPtr QueueSizeLimit;
+        NMonitoring::TDynamicCounters::TCounterPtr LoadCpuThreshold;
+
+        TCommonCounters(NMonitoring::TDynamicCounterPtr counters, const TString& database, const TString& poolId, const NResourcePool::TPoolSettings& poolConfig)
+            : CountersRoot(counters)
+            , CountersSubgroup(counters->GetSubgroup("pool", CanonizePath(TStringBuilder() << database << "/" << poolId)))
+        {
+            Register();
+            UpdateConfigCounters(poolConfig);
+        }
+
+        void CollectRequestLatency(TInstant continueTime) {
+            if (continueTime) {
+                RequestsLatencyMs->Collect((TInstant::Now() - continueTime).MilliSeconds());
+            }
+        }
+
+        void UpdateConfigCounters(const NResourcePool::TPoolSettings& poolConfig) {
+            InFlightLimit->Set(std::max(poolConfig.ConcurrentQueryLimit, 0));
+            QueueSizeLimit->Set(std::max(poolConfig.QueueSize, 0));
+            LoadCpuThreshold->Set(std::max(poolConfig.DatabaseLoadCpuThreshold, 0.0));
+        }
+
+        void OnCleanup() {
+            ActivePoolHandlers->Dec();
+
+            InFlightLimit->Set(0);
+            QueueSizeLimit->Set(0);
+            LoadCpuThreshold->Set(0);
+        }
+
+    private:
+        void Register() {
+            ActivePoolHandlers = CountersRoot->GetCounter("ActivePoolHandlers", false);
+            ActivePoolHandlers->Inc();
+
+            LocalInFly = CountersSubgroup->GetCounter("LocalInFly", false);
+            LocalDelayedRequests = CountersSubgroup->GetCounter("LocalDelayedRequests", false);
+            ContinueOk = CountersSubgroup->GetCounter("ContinueOk", true);
+            ContinueOverloaded = CountersSubgroup->GetCounter("ContinueOverloaded", true);
+            ContinueError = CountersSubgroup->GetCounter("ContinueError", true);
+            CleanupOk = CountersSubgroup->GetCounter("CleanupOk", true);
+            CleanupError = CountersSubgroup->GetCounter("CleanupError", true);
+            Cancelled = CountersSubgroup->GetCounter("Cancelled", true);
+            DelayedTimeMs = CountersSubgroup->GetHistogram("DelayedTimeMs", NMonitoring::ExponentialHistogram(20, 2, 4));
+            RequestsLatencyMs = CountersSubgroup->GetHistogram("RequestsLatencyMs", NMonitoring::ExponentialHistogram(20, 2, 4));
+
+            InFlightLimit = CountersSubgroup->GetCounter("InFlightLimit", false);
+            QueueSizeLimit = CountersSubgroup->GetCounter("QueueSizeLimit", false);
+            LoadCpuThreshold = CountersSubgroup->GetCounter("LoadCpuThreshold", false);
+        }
+    };
+
 protected:
     struct TRequest {
         enum class EState {
@@ -38,6 +112,7 @@ protected:
         const TActorId WorkerActorId;
         const TString SessionId;
         const TInstant StartTime = TInstant::Now();
+        TInstant ContinueTime;
 
         EState State = EState::Pending;
         bool Started = false;  // after TEvContinueRequest success
@@ -50,22 +125,20 @@ protected:
 public:
     TPoolHandlerActorBase(void (TDerived::* requestFunc)(TAutoPtr<IEventHandle>& ev), const TString& database, const TString& poolId, const NResourcePool::TPoolSettings& poolConfig, NMonitoring::TDynamicCounterPtr counters)
         : TBase(requestFunc)
-        , CountersRoot(counters)
-        , CountersSubgroup(counters->GetSubgroup("pool", CanonizePath(TStringBuilder() << database << "/" << poolId)))
+        , Counters(counters, database, poolId, poolConfig)
         , Database(database)
         , PoolId(poolId)
         , QueueSizeLimit(GetMaxQueueSize(poolConfig))
         , InFlightLimit(GetMaxInFlight(poolConfig))
         , PoolConfig(poolConfig)
-    {
-        RegisterCounters();
-    }
+    {}
 
     STRICT_STFUNC(StateFuncBase,
         // Workload service events
         sFunc(TEvents::TEvPoison, HandlePoison);
         sFunc(TEvPrivate::TEvStopPoolHandler, HandleStop);
         hFunc(TEvPrivate::TEvResolvePoolResponse, Handle);
+        hFunc(TEvPrivate::TEvUpdatePoolSubscription, Handle);
 
         // Pool handler events
         hFunc(TEvPrivate::TEvCancelRequest, Handle);
@@ -76,7 +149,7 @@ public:
 
         // Schemeboard events
         hFunc(TEvTxProxySchemeCache::TEvWatchNotifyUpdated, Handle);
-        IgnoreFunc(TEvTxProxySchemeCache::TEvWatchNotifyDeleted);
+        hFunc(TEvTxProxySchemeCache::TEvWatchNotifyDeleted, Handle);
         IgnoreFunc(TEvTxProxySchemeCache::TEvWatchNotifyUnavailable);
     )
 
@@ -85,7 +158,9 @@ public:
             this->Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvWatchRemove(0));
         }
 
-        ActivePoolHandlers->Dec();
+        SendPoolInfoUpdate(std::nullopt, std::nullopt, Subscribers);
+
+        Counters.OnCleanup();
 
         TBase::PassAway();
     }
@@ -106,6 +181,8 @@ private:
     }
 
     void Handle(TEvPrivate::TEvResolvePoolResponse::TPtr& ev) {
+        this->Send(MakeKqpWorkloadServiceId(this->SelfId().NodeId()), new TEvPrivate::TEvPlaceRequestIntoPoolResponse(Database, PoolId));
+
         auto event = std::move(ev->Get()->Event);
         const TActorId& workerActorId = event->Sender;
         if (!InFlightLimit) {
@@ -125,13 +202,11 @@ private:
         }
 
         TRequest* request = &LocalSessions.insert({sessionId, TRequest(workerActorId, sessionId)}).first->second;
-        LocalDelayedRequests->Inc();
+        Counters.LocalDelayedRequests->Inc();
 
         UpdatePoolConfig(ev->Get()->PoolConfig);
         UpdateSchemeboardSubscription(ev->Get()->PathId);
         OnScheduleRequest(request);
-
-        this->Send(MakeKqpWorkloadServiceId(this->SelfId().NodeId()), new TEvPrivate::TEvPlaceRequestIntoPoolResponse(Database, PoolId));
     }
 
     void Handle(TEvCleanupRequest::TPtr& ev) {
@@ -167,6 +242,14 @@ private:
         OnCleanupRequest(request);
     }
 
+    void Handle(TEvPrivate::TEvUpdatePoolSubscription::TPtr& ev) {
+        const auto& newSubscribers = ev->Get()->Subscribers;
+        if (!UpdateSchemeboardSubscription(ev->Get()->PathId)) {
+            SendPoolInfoUpdate(PoolConfig, SecurityObject, newSubscribers);
+        }
+        Subscribers.insert(newSubscribers.begin(), newSubscribers.end());
+    }
+
     void Handle(TEvTxProxySchemeCache::TEvWatchNotifyUpdated::TPtr& ev) {
         if (ev->Get()->Key != WatchKey) {
             // Skip old paths watch notifications
@@ -189,6 +272,23 @@ private:
         NResourcePool::TPoolSettings poolConfig;
         ParsePoolSettings(result->GetPathDescription().GetResourcePoolDescription(), poolConfig);
         UpdatePoolConfig(poolConfig);
+
+        const auto& pathDescription = result->GetPathDescription().GetSelf();
+        SecurityObject = NACLib::TSecurityObject(pathDescription.GetOwner(), false);
+        if (!SecurityObject->MutableACL()->ParseFromString(pathDescription.GetEffectiveACL())) {
+            SecurityObject = std::nullopt;
+        }
+        SendPoolInfoUpdate(poolConfig, SecurityObject, Subscribers);
+    }
+
+    void Handle(TEvTxProxySchemeCache::TEvWatchNotifyDeleted::TPtr& ev) {
+        if (ev->Get()->Key != WatchKey) {
+            // Skip old paths watch notifications
+            return;
+        }
+
+        LOG_D("Got delete notification");
+        SendPoolInfoUpdate(std::nullopt, std::nullopt, Subscribers);
     }
 
 public:
@@ -202,25 +302,26 @@ public:
         if (status == Ydb::StatusIds::SUCCESS) {
             LocalInFlight++;
             request->Started = true;
-            LocalInFly->Inc();
-            ContinueOk->Inc();
-            DelayedTimeMs->Collect((TInstant::Now() - request->StartTime).MilliSeconds());
+            request->ContinueTime = TInstant::Now();
+            Counters.LocalInFly->Inc();
+            Counters.ContinueOk->Inc();
+            Counters.DelayedTimeMs->Collect((TInstant::Now() - request->StartTime).MilliSeconds());
             LOG_D("Reply continue success to " << request->WorkerActorId << ", session id: " << request->SessionId << ", local in flight: " << LocalInFlight);
         } else {
             if (status == Ydb::StatusIds::OVERLOADED) {
-                ContinueOverloaded->Inc();
+                Counters.ContinueOverloaded->Inc();
                 LOG_I("Reply overloaded to " << request->WorkerActorId << ", session id: " << request->SessionId << ", issues: " << issues.ToOneLineString());
             } else if (status == Ydb::StatusIds::CANCELLED) {
-                Cancelled->Inc();
+                Counters.Cancelled->Inc();
                 LOG_I("Reply cancelled to " << request->WorkerActorId << ", session id: " << request->SessionId << ", issues: " << issues.ToOneLineString());
             } else {
-                ContinueError->Inc();
+                Counters.ContinueError->Inc();
                 LOG_W("Reply continue error " << status << " to " << request->WorkerActorId << ", session id: " << request->SessionId << ", issues: " << issues.ToOneLineString());
             }
             RemoveRequest(request);
         }
 
-        LocalDelayedRequests->Dec();
+        Counters.LocalDelayedRequests->Dec();
     }
 
     void FinalReply(TRequest* request, Ydb::StatusIds::StatusCode status, const TString& message) {
@@ -239,9 +340,9 @@ public:
 
         if (request->Started) {
             LocalInFlight--;
-            LocalInFly->Dec();
+            Counters.LocalInFly->Dec();
         } else {
-            LocalDelayedRequests->Dec();
+            Counters.LocalDelayedRequests->Dec();
         }
 
         if (request->State == TRequest::EState::Canceling) {
@@ -251,6 +352,12 @@ public:
         }
 
         RemoveRequest(request);
+    }
+
+    void SendPoolInfoUpdate(const std::optional<NResourcePool::TPoolSettings>& config, const std::optional<NACLib::TSecurityObject>& securityObject, const std::unordered_set<TActorId>& subscribers) const {
+        for (const auto& subscriber : subscribers) {
+            this->Send(subscriber, new TEvUpdatePoolInfo(Database, PoolId, config, securityObject));
+        }
     }
 
 protected:
@@ -321,11 +428,11 @@ private:
         this->Send(request->WorkerActorId, new TEvCleanupResponse(status, issues));
 
         if (status == Ydb::StatusIds::SUCCESS) {
-            CleanupOk->Inc();
-            RequestsLatencyMs->Collect((TInstant::Now() - request->StartTime).MilliSeconds());
+            Counters.CleanupOk->Inc();
+            Counters.CollectRequestLatency(request->ContinueTime);
             LOG_D("Reply cleanup success to " << request->WorkerActorId << ", session id: " << request->SessionId << ", local in flight: " << LocalInFlight);
         } else {
-            CleanupError->Inc();
+            Counters.CleanupError->Inc();
             LOG_W("Reply cleanup error " << status << " to " << request->WorkerActorId << ", session id: " << request->SessionId << ", issues: " << issues.ToOneLineString());
         }
     }
@@ -335,14 +442,14 @@ private:
         ev->Record.MutableRequest()->SetSessionId(request->SessionId);
         this->Send(MakeKqpProxyID(this->SelfId().NodeId()), ev.release());
 
-        Cancelled->Inc();
-        RequestsLatencyMs->Collect((TInstant::Now() - request->StartTime).MilliSeconds());
+        Counters.Cancelled->Inc();
+        Counters.CollectRequestLatency(request->ContinueTime);
         LOG_I("Cancel request for worker " << request->WorkerActorId << ", session id: " << request->SessionId << ", local in flight: " << LocalInFlight);
     }
 
-    void UpdateSchemeboardSubscription(TPathId pathId) {
+    bool UpdateSchemeboardSubscription(TPathId pathId) {
         if (WatchPathId && *WatchPathId == pathId) {
-            return;
+            return false;
         }
 
         if (WatchPathId) {
@@ -355,6 +462,7 @@ private:
         LOG_D("Subscribed on schemeboard notifications for path: " << pathId.ToString());
         WatchPathId = std::make_unique<TPathId>(pathId);
         this->Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvWatchPathId(*WatchPathId, WatchKey));
+        return true;
     }
 
     void UpdatePoolConfig(const NResourcePool::TPoolSettings& poolConfig) {
@@ -366,10 +474,11 @@ private:
         PoolConfig = poolConfig;
         QueueSizeLimit = GetMaxQueueSize(poolConfig);
         InFlightLimit = GetMaxInFlight(poolConfig);
+        Counters.UpdateConfigCounters(poolConfig);
         RefreshState(true);
 
         if (ShouldResign()) {
-            const TActorId& newHandler = this->RegisterWithSameMailbox(CreatePoolHandlerActor(Database, PoolId, poolConfig, CountersRoot));
+            const TActorId& newHandler = this->RegisterWithSameMailbox(CreatePoolHandlerActor(Database, PoolId, poolConfig, Counters.CountersRoot));
             this->Send(MakeKqpWorkloadServiceId(this->SelfId().NodeId()), new TEvPrivate::TEvResignPoolHandler(Database, PoolId, newHandler));
         }
     }
@@ -384,25 +493,8 @@ private:
         return concurrentQueryLimit == -1 ? std::numeric_limits<ui64>::max() : static_cast<ui64>(concurrentQueryLimit);
     }
 
-    void RegisterCounters() {
-        ActivePoolHandlers = CountersRoot->GetCounter("ActivePoolHandlers", false);
-        ActivePoolHandlers->Inc();
-
-        LocalInFly = CountersSubgroup->GetCounter("LocalInFly", false);
-        LocalDelayedRequests = CountersSubgroup->GetCounter("LocalDelayedRequests", false);
-        ContinueOk = CountersSubgroup->GetCounter("ContinueOk", true);
-        ContinueOverloaded = CountersSubgroup->GetCounter("ContinueOverloaded", true);
-        ContinueError = CountersSubgroup->GetCounter("ContinueError", true);
-        CleanupOk = CountersSubgroup->GetCounter("CleanupOk", true);
-        CleanupError = CountersSubgroup->GetCounter("CleanupError", true);
-        Cancelled = CountersSubgroup->GetCounter("Cancelled", true);
-        DelayedTimeMs = CountersSubgroup->GetHistogram("DelayedTimeMs", NMonitoring::ExponentialHistogram(20, 2, 4));
-        RequestsLatencyMs = CountersSubgroup->GetHistogram("RequestsLatencyMs", NMonitoring::ExponentialHistogram(20, 2, 4));
-    }
-
 protected:
-    NMonitoring::TDynamicCounterPtr CountersRoot;
-    NMonitoring::TDynamicCounterPtr CountersSubgroup;
+    TCommonCounters Counters;
 
     // Configuration
     const TString Database;
@@ -412,28 +504,17 @@ protected:
 
 private:
     NResourcePool::TPoolSettings PoolConfig;
+    std::optional<NACLib::TSecurityObject> SecurityObject;
 
     // Scheme board settings
     std::unique_ptr<TPathId> WatchPathId;
     ui64 WatchKey = 0;
+    std::unordered_set<TActorId> Subscribers;
 
     // Pool state
     ui64 LocalInFlight = 0;
     std::unordered_map<TString, TRequest> LocalSessions;
     bool StopHandler = false;  // Stop than all requests finished
-
-    // Counters
-    NMonitoring::TDynamicCounters::TCounterPtr ActivePoolHandlers;
-    NMonitoring::TDynamicCounters::TCounterPtr LocalInFly;
-    NMonitoring::TDynamicCounters::TCounterPtr LocalDelayedRequests;
-    NMonitoring::TDynamicCounters::TCounterPtr ContinueOk;
-    NMonitoring::TDynamicCounters::TCounterPtr ContinueOverloaded;
-    NMonitoring::TDynamicCounters::TCounterPtr ContinueError;
-    NMonitoring::TDynamicCounters::TCounterPtr CleanupOk;
-    NMonitoring::TDynamicCounters::TCounterPtr CleanupError;
-    NMonitoring::TDynamicCounters::TCounterPtr Cancelled;
-    NMonitoring::THistogramPtr DelayedTimeMs;
-    NMonitoring::THistogramPtr RequestsLatencyMs;
 };
 
 
@@ -465,6 +546,38 @@ protected:
 class TFifoPoolHandlerActor : public TPoolHandlerActorBase<TFifoPoolHandlerActor> {
     using TBase = TPoolHandlerActorBase<TFifoPoolHandlerActor>;
 
+    struct TCounters {
+        // Fifo pool counters
+        NMonitoring::TDynamicCounters::TCounterPtr PendingRequestsCount;
+        NMonitoring::TDynamicCounters::TCounterPtr FinishingRequestsCount;
+        NMonitoring::TDynamicCounters::TCounterPtr GlobalInFly;
+        NMonitoring::TDynamicCounters::TCounterPtr GlobalDelayedRequests;
+        NMonitoring::THistogramPtr PoolStateUpdatesBacklogMs;
+
+        TCounters(NMonitoring::TDynamicCounterPtr countersSubgroup) {
+            Register(countersSubgroup);
+        }
+
+        void UpdateGlobalState(const TPoolStateDescription& description) {
+            GlobalInFly->Set(description.RunningRequests);
+            GlobalDelayedRequests->Set(description.DelayedRequests);
+        }
+
+        void OnCleanup() {
+            GlobalInFly->Set(0);
+            GlobalDelayedRequests->Set(0);
+        }
+
+    private:
+        void Register(NMonitoring::TDynamicCounterPtr countersSubgroup) {
+            PendingRequestsCount = countersSubgroup->GetCounter("PendingRequestsCount", false);
+            FinishingRequestsCount = countersSubgroup->GetCounter("FinishingRequestsCount", false);
+            GlobalInFly = countersSubgroup->GetCounter("GlobalInFly", false);
+            GlobalDelayedRequests = countersSubgroup->GetCounter("GlobalDelayedRequests", false);
+            PoolStateUpdatesBacklogMs = countersSubgroup->GetHistogram("PoolStateUpdatesBacklogMs", NMonitoring::LinearHistogram(20, 0, 3 * LEASE_DURATION.MillisecondsFloat() / 40)); 
+        }
+    };
+
     enum class EStartRequestCase {
         Pending,
         Delayed
@@ -475,9 +588,9 @@ class TFifoPoolHandlerActor : public TPoolHandlerActorBase<TFifoPoolHandlerActor
 public:
     TFifoPoolHandlerActor(const TString& database, const TString& poolId, const NResourcePool::TPoolSettings& poolConfig, NMonitoring::TDynamicCounterPtr counters)
         : TBase(&TFifoPoolHandlerActor::StateFunc, database, poolId, poolConfig, counters)
+        , FifoCounters(Counters.CountersSubgroup)
     {
         Y_ENSURE(!ShouldResign());
-        RegisterCounters();
     }
 
     STFUNC(StateFunc) {
@@ -485,6 +598,7 @@ public:
             sFunc(TEvents::TEvWakeup, HandleRefreshState);
             sFunc(TEvPrivate::TEvRefreshPoolState, HandleExternalRefreshState);
             hFunc(TEvPrivate::TEvCpuQuotaResponse, Handle);
+            hFunc(TEvPrivate::TEvNodesInfoResponse, Handle);
 
             hFunc(TEvPrivate::TEvTablesCreationFinished, Handle);
             hFunc(TEvPrivate::TEvRefreshPoolStateResponse, Handle);
@@ -497,8 +611,7 @@ public:
     }
 
     void PassAway() override {
-        GlobalInFly->Set(0);
-        GlobalDelayedRequests->Set(0);
+        FifoCounters.OnCleanup();
 
         TBase::PassAway();
     }
@@ -509,13 +622,13 @@ protected:
     }
 
     void OnScheduleRequest(TRequest* request) override {
-        if (PendingRequests.size() >= MAX_PENDING_REQUESTS || GetLocalSessionsCount() - GetLocalInFlight() > QueueSizeLimit + 1) {
+        if (PendingRequests.size() >= MAX_PENDING_REQUESTS || SaturationSub(GetLocalSessionsCount() - GetLocalInFlight(), InFlightLimit) > QueueSizeLimit) {
             ReplyContinue(request, Ydb::StatusIds::OVERLOADED, TStringBuilder() << "Too many pending requests for pool " << PoolId);
             return;
         }
 
         PendingRequests.emplace_back(request->SessionId);
-        PendingRequestsCount->Inc();
+        FifoCounters.PendingRequestsCount->Inc();
 
         if (!PreparingFinished) {
             this->Send(MakeKqpWorkloadServiceId(this->SelfId().NodeId()), new TEvPrivate::TEvPrepareTablesRequest(Database, PoolId));
@@ -534,6 +647,11 @@ protected:
     }
 
     void RefreshState(bool refreshRequired = false) override {
+        if (!WaitingNodesInfo && TInstant::Now() - LastNodesInfoRefreshTime > LEASE_DURATION) {
+            WaitingNodesInfo = true;
+            this->Send(MakeKqpWorkloadServiceId(this->SelfId().NodeId()), new TEvPrivate::TEvNodesInfoRequest());
+        }
+
         RefreshRequired |= refreshRequired;
         if (!PreparingFinished) {
             return;
@@ -551,7 +669,7 @@ protected:
         if (RefreshRequired) {
             RefreshRequired = false;
             RunningOperation = true;
-            this->Register(CreateRefreshPoolStateActor(this->SelfId(), Database, PoolId, LEASE_DURATION, CountersSubgroup));
+            this->Register(CreateRefreshPoolStateActor(this->SelfId(), Database, PoolId, LEASE_DURATION, Counters.CountersSubgroup));
         }
     }
 
@@ -571,6 +689,14 @@ private:
         RefreshState(true);
     }
 
+    void Handle(TEvPrivate::TEvNodesInfoResponse::TPtr& ev) {
+        WaitingNodesInfo = false;
+        LastNodesInfoRefreshTime = TInstant::Now();
+        NodeCount = ev->Get()->NodeCount;
+
+        LOG_T("Updated node info, noode count: " << NodeCount);
+    }
+
     void Handle(TEvPrivate::TEvTablesCreationFinished::TPtr& ev) {
         if (ev->Get()->Success) {
             PreparingFinished = true;
@@ -584,7 +710,7 @@ private:
         });
 
         PendingRequests.clear();
-        PendingRequestsCount->Set(0);
+        FifoCounters.PendingRequestsCount->Set(0);
     }
 
     void Handle(TEvPrivate::TEvRefreshPoolStateResponse::TPtr& ev) {
@@ -598,7 +724,7 @@ private:
         }
 
         if (LastRefreshTime) {
-            PoolStateUpdatesBacklogMs->Collect((TInstant::Now() - LastRefreshTime).MilliSeconds());
+            FifoCounters.PoolStateUpdatesBacklogMs->Collect((TInstant::Now() - LastRefreshTime).MilliSeconds());
         }
         LastRefreshTime = TInstant::Now();
 
@@ -606,8 +732,7 @@ private:
         if (GlobalState.AmountRequests()) {
             ScheduleRefresh();
         }
-        GlobalInFly->Set(GlobalState.RunningRequests);
-        GlobalDelayedRequests->Set(GlobalState.DelayedRequests);
+        FifoCounters.UpdateGlobalState(GlobalState);
         LOG_T("succefully refreshed pool state, in flight: " << GlobalState.RunningRequests << ", delayed: " << GlobalState.DelayedRequests);
 
         RemoveFinishedRequests();
@@ -615,11 +740,11 @@ private:
         size_t delayedRequestsCount = DelayedRequests.size();
         DoStartPendingRequest(GetLoadCpuThreshold());
 
-        if (GlobalState.DelayedRequests + PendingRequests.size() > QueueSizeLimit) {
-            RemoveBackRequests(PendingRequests, std::min(GlobalState.DelayedRequests + PendingRequests.size() - QueueSizeLimit, PendingRequests.size()), [this](TRequest* request) {
+        if (const ui64 delayedRequests = SaturationSub(GlobalState.AmountRequests() + PendingRequests.size(), InFlightLimit); delayedRequests > QueueSizeLimit) {
+            RemoveBackRequests(PendingRequests, std::min(delayedRequests - QueueSizeLimit, PendingRequests.size()), [this](TRequest* request) {
                 ReplyContinue(request, Ydb::StatusIds::OVERLOADED, TStringBuilder() << "Too many pending requests for pool " << PoolId);
             });
-            PendingRequestsCount->Set(PendingRequests.size());
+            FifoCounters.PendingRequestsCount->Set(PendingRequests.size());
         }
 
         if (PendingRequests.empty() && delayedRequestsCount > QueueSizeLimit) {
@@ -649,7 +774,7 @@ private:
         }
 
         GlobalState.DelayedRequests++;
-        GlobalDelayedRequests->Inc();
+        FifoCounters.GlobalDelayedRequests->Inc();
         LOG_D("succefully delayed request, session id: " << ev->Get()->SessionId);
 
         DoStartDelayedRequest(GetLoadCpuThreshold());
@@ -677,7 +802,7 @@ private:
                 if (!RunningOperation && !DelayedRequests.empty()) {
                     RunningOperation = true;
                     const TString& sessionId = DelayedRequests.front();
-                    this->Register(CreateStartRequestActor(this->SelfId(), Database, PoolId, sessionId, LEASE_DURATION, CountersSubgroup));
+                    this->Register(CreateStartRequestActor(this->SelfId(), Database, PoolId, sessionId, LEASE_DURATION, Counters.CountersSubgroup));
                     GetRequest(sessionId)->CleanupRequired = true;
                 }
                 break;
@@ -724,12 +849,12 @@ private:
                     request->UsedCpuQuota = !!GetLoadCpuThreshold();
                     requestFound = true;
                     GlobalState.RunningRequests++;
-                    GlobalInFly->Inc();
+                    FifoCounters.GlobalInFly->Inc();
                     ReplyContinue(request);
                 } else {
                     // Request was dropped due to lease expiration 
                     PendingRequests.emplace_front(request->SessionId);
-                    PendingRequestsCount->Inc();
+                    FifoCounters.PendingRequestsCount->Inc();
                 }
             });
             DelayedRequests.pop_front();
@@ -766,14 +891,16 @@ private:
             return;
         }
 
-        if (!PendingRequests.empty() && QueueSizeLimit == 0 && GlobalState.RunningRequests < InFlightLimit) {
+        bool canStartRequest = QueueSizeLimit == 0 && GlobalState.RunningRequests < InFlightLimit;
+        canStartRequest |= !GetLoadCpuThreshold() && DelayedRequests.size() + GlobalState.DelayedRequests == 0 && NodeCount && GlobalState.RunningRequests + NodeCount < InFlightLimit;
+        if (!PendingRequests.empty() && canStartRequest) {
             RunningOperation = true;
             const TString& sessionId = PopPendingRequest();
             DelayedRequests.emplace_front(sessionId);
             if (loadCpuThreshold) {
                 RequestCpuQuota(*loadCpuThreshold, EStartRequestCase::Pending);
             } else {
-                this->Register(CreateStartRequestActor(this->SelfId(), Database, PoolId, sessionId, LEASE_DURATION, CountersSubgroup));
+                this->Register(CreateStartRequestActor(this->SelfId(), Database, PoolId, sessionId, LEASE_DURATION, Counters.CountersSubgroup));
                 GetRequest(sessionId)->CleanupRequired = true;
             }
         }
@@ -790,7 +917,7 @@ private:
             if (loadCpuThreshold) {
                 RequestCpuQuota(*loadCpuThreshold, EStartRequestCase::Delayed);
             } else {
-                this->Register(CreateStartRequestActor(this->SelfId(), Database, PoolId, std::nullopt, LEASE_DURATION, CountersSubgroup));
+                this->Register(CreateStartRequestActor(this->SelfId(), Database, PoolId, std::nullopt, LEASE_DURATION, Counters.CountersSubgroup));
             }
         }
     }
@@ -805,7 +932,7 @@ private:
             RunningOperation = true;
             const TString& sessionId = PopPendingRequest();
             TRequest* request = GetRequest(sessionId);
-            this->Register(CreateDelayRequestActor(this->SelfId(), Database, PoolId, sessionId, request->StartTime, GetWaitDeadline(request->StartTime), LEASE_DURATION, CountersSubgroup));
+            this->Register(CreateDelayRequestActor(this->SelfId(), Database, PoolId, sessionId, request->StartTime, GetWaitDeadline(request->StartTime), LEASE_DURATION, Counters.CountersSubgroup));
             DelayedRequests.emplace_back(sessionId);
             request->CleanupRequired = true;
         }
@@ -818,9 +945,9 @@ private:
 
         if (!FinishedRequests.empty()) {
             RunningOperation = true;
-            this->Register(CreateCleanupRequestsActor(this->SelfId(), Database, PoolId, FinishedRequests, CountersSubgroup));
+            this->Register(CreateCleanupRequestsActor(this->SelfId(), Database, PoolId, FinishedRequests, Counters.CountersSubgroup));
             FinishedRequests.clear();
-            FinishingRequestsCount->Set(0);
+            FifoCounters.FinishingRequestsCount->Set(0);
         }
     }
 
@@ -844,7 +971,7 @@ private:
 
         RemoveFinishedRequests(PendingRequests);
         RemoveFinishedRequests(DelayedRequests);
-        PendingRequestsCount->Set(PendingRequests.size());
+        FifoCounters.PendingRequestsCount->Set(PendingRequests.size());
     }
 
     void RemoveFinishedRequests(std::deque<TString>& requests) {
@@ -885,24 +1012,18 @@ private:
     TString PopPendingRequest() {
         TString sessionId = PendingRequests.front();
         PendingRequests.pop_front();
-        PendingRequestsCount->Dec();
+        FifoCounters.PendingRequestsCount->Dec();
         return sessionId;
     }
 
     void AddFinishedRequest(const TString& sessionId) {
         FinishedRequests.emplace_back(sessionId);
-        FinishingRequestsCount->Inc();
-    }
-
-    void RegisterCounters() {
-        PendingRequestsCount = CountersSubgroup->GetCounter("PendingRequestsCount", false);
-        FinishingRequestsCount = CountersSubgroup->GetCounter("FinishingRequestsCount", false);
-        GlobalInFly = CountersSubgroup->GetCounter("GlobalInFly", false);
-        GlobalDelayedRequests = CountersSubgroup->GetCounter("GlobalDelayedRequests", false);
-        PoolStateUpdatesBacklogMs = CountersSubgroup->GetHistogram("PoolStateUpdatesBacklogMs", NMonitoring::LinearHistogram(20, 0, 3 * LEASE_DURATION.MillisecondsFloat() / 40));
+        FifoCounters.FinishingRequestsCount->Inc();
     }
 
 private:
+    TCounters FifoCounters;
+
     bool PreparingFinished = false;
     bool RefreshRequired = false;
     bool RunningOperation = false;
@@ -915,11 +1036,9 @@ private:
     TInstant LastRefreshTime = TInstant::Zero();
     TPoolStateDescription GlobalState;
 
-    NMonitoring::TDynamicCounters::TCounterPtr PendingRequestsCount;
-    NMonitoring::TDynamicCounters::TCounterPtr FinishingRequestsCount;
-    NMonitoring::TDynamicCounters::TCounterPtr GlobalInFly;
-    NMonitoring::TDynamicCounters::TCounterPtr GlobalDelayedRequests;
-    NMonitoring::THistogramPtr PoolStateUpdatesBacklogMs;
+    bool WaitingNodesInfo = false;
+    TInstant LastNodesInfoRefreshTime = TInstant::Zero();
+    ui32 NodeCount = 0;
 };
 
 }  // anonymous namespace

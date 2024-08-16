@@ -905,7 +905,7 @@ namespace NActors {
         TGuard<TMutex> guard(Mutex);
         TNodeDataBase* node = Nodes[FirstNodeId + nodeIndex].Get();
         if (UseRealThreads) {
-            Y_ABORT_UNLESS(poolId < node->ExecutorPools.size());
+            Y_ABORT_UNLESS(node->ExecutorPools.contains(poolId));
             return node->ExecutorPools[poolId]->Register(actor, mailboxType, revolvingCounter, parentId);
         }
 
@@ -973,7 +973,7 @@ namespace NActors {
         TGuard<TMutex> guard(Mutex);
         TNodeDataBase* node = Nodes[FirstNodeId + nodeIndex].Get();
         if (UseRealThreads) {
-            Y_ABORT_UNLESS(poolId < node->ExecutorPools.size());
+            Y_ABORT_UNLESS(node->ExecutorPools.contains(poolId));
             return node->ExecutorPools[poolId]->Register(actor, mailbox, hint, parentId);
         }
 
@@ -1688,14 +1688,20 @@ namespace NActors {
         THolder<TActorSystemSetup> setup(new TActorSystemSetup);
         setup->NodeId = FirstNodeId + nodeIndex;
 
+        IHarmonizer* harmonizer = nullptr;
+        if (node) {
+            node->Harmonizer.reset(MakeHarmonizer(GetCycleCountFast()));
+            harmonizer = node->Harmonizer.get();
+        }
+
         if (UseRealThreads) {
             setup->ExecutorsCount = 5;
             setup->Executors.Reset(new TAutoPtr<IExecutorPool>[5]);
-            setup->Executors[0].Reset(new TBasicExecutorPool(0, 2, 20));
-            setup->Executors[1].Reset(new TBasicExecutorPool(1, 2, 20));
-            setup->Executors[2].Reset(new TIOExecutorPool(2, 1));
-            setup->Executors[3].Reset(new TBasicExecutorPool(3, 2, 20));
-            setup->Executors[4].Reset(new TBasicExecutorPool(4, 1, 20));
+            setup->Executors[0].Reset(new TBasicExecutorPool(0, 2, 20, "System", harmonizer));
+            setup->Executors[1].Reset(new TBasicExecutorPool(1, 2, 20, "User", harmonizer));
+            setup->Executors[2].Reset(new TIOExecutorPool(2, 1, "IO"));
+            setup->Executors[3].Reset(new TBasicExecutorPool(3, 2, 20, "Batch", harmonizer));
+            setup->Executors[4].Reset(new TBasicExecutorPool(4, 1, 20, "IC", harmonizer));
             setup->Scheduler.Reset(new TBasicSchedulerThread(TSchedulerConfig(512, 100)));
         } else {
             setup->ExecutorsCount = 1;
@@ -1704,7 +1710,7 @@ namespace NActors {
             setup->Executors[0].Reset(new TExecutorPoolStub(this, nodeIndex, node, 0));
         }
 
-        InitActorSystemSetup(*setup);
+        InitActorSystemSetup(*setup, node);
 
         return setup;
     }
@@ -1712,9 +1718,11 @@ namespace NActors {
     THolder<TActorSystem> TTestActorRuntimeBase::MakeActorSystem(ui32 nodeIndex, TNodeDataBase* node) {
         auto setup = MakeActorSystemSetup(nodeIndex, node);
 
-        node->ExecutorPools.resize(setup->ExecutorsCount);
+        node->ExecutorPools.reserve(setup->ExecutorsCount);
         for (ui32 i = 0; i < setup->ExecutorsCount; ++i) {
-            node->ExecutorPools[i] = setup->Executors[i].Get();
+            IExecutorPool* executor = setup->Executors[i].Get();
+            node->ExecutorPools[i] = executor;
+            node->Harmonizer->AddPool(executor);
         }
 
         const auto& interconnectCounters = GetCountersForComponent(node->DynamicCounters, "interconnect");
@@ -1778,7 +1786,18 @@ namespace NActors {
             setup->LocalServices.push_back(std::move(loggerActorPair));
         }
 
-        return THolder<TActorSystem>(new TActorSystem(setup, node->GetAppData(), node->LogSettings));
+        auto actorSystem = THolder<TActorSystem>(new TActorSystem(setup, node->GetAppData(), node->LogSettings));
+
+        if (node->ExecutorPools.empty()) {
+            // Initialize pools from actor system (except IO pool)
+            const auto& pools = actorSystem->GetBasicExecutorPools();
+            node->ExecutorPools.reserve(pools.size());
+            for (IExecutorPool* pool : pools) {
+                node->ExecutorPools[pool->PoolId] = pool;
+            }
+        }
+
+        return actorSystem;
     }
 
     TActorSystem* TTestActorRuntimeBase::SingleSys() const {
