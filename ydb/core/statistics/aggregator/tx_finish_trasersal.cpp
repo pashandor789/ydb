@@ -12,7 +12,7 @@ struct TStatisticsAggregator::TTxFinishTraversal : public TTxBase {
     TTxFinishTraversal(TSelf* self)
         : TTxBase(self)
         , OperationId(self->ForceTraversalOperationId)
-        , PathId(self->TraversalTableId.PathId)
+        , PathId(self->TraversalPathId)
     {
         auto forceTraversal = Self->CurrentForceTraversalOperation();
         if (forceTraversal) {
@@ -50,6 +50,7 @@ struct TStatisticsAggregator::TTxFinishTraversal : public TTxBase {
                 "Send TEvAnalyzeResponse, OperationId=" << OperationId << ", ActorId=" << ReplyToActorId);
             auto response = std::make_unique<TEvStatistics::TEvAnalyzeResponse>();
             response->Record.SetOperationId(OperationId);
+            response->Record.SetStatus(NKikimrStat::TEvAnalyzeResponse::STATUS_SUCCESS);
             ctx.Send(ReplyToActorId, response.release());
         }
     }

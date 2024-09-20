@@ -9,12 +9,13 @@
 
 namespace NKikimr::NColumnShard {
 
-void TInFlightReadsTracker::RemoveInFlightRequest(ui64 cookie, const NOlap::TVersionedIndex* /*index*/, const TInstant now) {
+NOlap::NReader::TReadMetadataBase::TConstPtr TInFlightReadsTracker::ExtractInFlightRequest(
+    ui64 cookie, const NOlap::TVersionedIndex* /*index*/, const TInstant now) {
     auto it = RequestsMeta.find(cookie);
     AFL_VERIFY(it != RequestsMeta.end())("cookie", cookie);
-    const auto& readMetaList = it->second;
+    const NOlap::NReader::TReadMetadataBase::TConstPtr readMetaBase = it->second;
 
-    for (const auto& readMetaBase : readMetaList) {
+    {
         {
             auto it = SnapshotsLive.find(readMetaBase->GetRequestSnapshot());
             AFL_VERIFY(it != SnapshotsLive.end());
@@ -35,16 +36,17 @@ void TInFlightReadsTracker::RemoveInFlightRequest(ui64 cookie, const NOlap::TVer
     Counters->OnSnapshotsInfo(SnapshotsLive.size(), GetSnapshotToClean());
 
     RequestsMeta.erase(cookie);
+    return readMetaBase;
 }
 
-TConclusionStatus TInFlightReadsTracker::AddToInFlightRequest(
+void TInFlightReadsTracker::AddToInFlightRequest(
     const ui64 cookie, NOlap::NReader::TReadMetadataBase::TConstPtr readMetaBase, const NOlap::TVersionedIndex* /*index*/) {
-    RequestsMeta[cookie].push_back(readMetaBase);
+    AFL_VERIFY(RequestsMeta.emplace(cookie, readMetaBase).second);
 
     auto readMeta = std::dynamic_pointer_cast<const NOlap::NReader::NPlain::TReadMetadata>(readMetaBase);
 
     if (!readMeta) {
-        return TConclusionStatus::Success();
+        return;
     }
 
     auto selectInfo = readMeta->SelectInfo;
@@ -56,7 +58,6 @@ TConclusionStatus TInFlightReadsTracker::AddToInFlightRequest(
     for (const auto& committedBlob : readMeta->CommittedBlobs) {
         tracker->UseBlob(committedBlob.GetBlobRange().GetBlobId());
     }
-    return TConclusionStatus::Success();
 }
 
 namespace {
@@ -138,7 +139,7 @@ bool TInFlightReadsTracker::LoadFromDatabase(NTable::TDatabase& tableDB) {
     return true;
 }
 
-NKikimr::TConclusion<ui64> TInFlightReadsTracker::AddInFlightRequest(
+ui64 TInFlightReadsTracker::AddInFlightRequest(
     NOlap::NReader::TReadMetadataBase::TConstPtr readMeta, const NOlap::TVersionedIndex* index) {
     const ui64 cookie = NextCookie++;
     auto it = SnapshotsLive.find(readMeta->GetRequestSnapshot());
@@ -147,10 +148,7 @@ NKikimr::TConclusion<ui64> TInFlightReadsTracker::AddInFlightRequest(
         Counters->OnSnapshotsInfo(SnapshotsLive.size(), GetSnapshotToClean());
     }
     it->second.AddRequest(cookie);
-    auto status = AddToInFlightRequest(cookie, readMeta, index);
-    if (!status) {
-        return status;
-    }
+    AddToInFlightRequest(cookie, readMeta, index);
     return cookie;
 }
 

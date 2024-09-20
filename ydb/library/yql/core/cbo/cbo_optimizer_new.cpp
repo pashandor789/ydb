@@ -6,8 +6,8 @@
 #include <util/generic/hash.h>
 #include <util/generic/hash_set.h>
 #include <util/string/cast.h>
-
-#include <library/cpp/disjoint_sets/disjoint_sets.h>
+#include <util/string/join.h>
+#include <util/string/printf.h>
 
 const TString& ToString(NYql::EJoinKind);
 const TString& ToString(NYql::EJoinAlgoType);
@@ -286,45 +286,28 @@ const TBaseProviderContext& TBaseProviderContext::Instance() {
     return staticContext;
 }
 
-TCardinalityHints::TCardinalityHints(const TString& json) {
-    auto jsonValue = NJson::TJsonValue();
-    NJson::ReadJsonTree(json, &jsonValue, true);
+TVector<TString> TOptimizerHints::GetUnappliedHintStrings() {
+    TVector<TString> res;
 
-    for (auto s : jsonValue.GetArraySafe()) {
-        auto h = s.GetMapSafe();
-
-        TCardinalityHints::TCardinalityHint hint;
-
-        for (auto t : h.at("labels").GetArraySafe()) {
-            hint.JoinLabels.push_back(t.GetStringSafe());
+    for (const auto& hint: JoinAlgoHints->Hints) {
+        if (!hint.Applied) {
+            res.push_back(hint.StringRepr);
         }
-
-        auto op = h.at("op").GetStringSafe();
-        hint.Operation = HintOpMap.at(op);
-
-        hint.Value = h.at("value").GetDoubleSafe();
-        Hints.push_back(hint);
     }
-}
 
-TJoinAlgoHints::TJoinAlgoHints(const TString& json) {
-    auto jsonValue = NJson::TJsonValue();
-    NJson::ReadJsonTree(json, &jsonValue, true);
-
-    for (auto s : jsonValue.GetArraySafe()) {
-        auto h = s.GetMapSafe();
-
-        TJoinAlgoHints::TJoinAlgoHint hint;
-
-        for (auto t : h.at("labels").GetArraySafe()) {
-            hint.JoinLabels.push_back(t.GetStringSafe());
+    for (const auto& hint: JoinOrderHints->Hints) {
+        if (!hint.Applied) {
+            res.push_back(hint.StringRepr);
         }
-
-        auto algo = h.at("algo").GetStringSafe();
-        hint.JoinHint = FromString<EJoinAlgoType>(algo);
-
-        Hints.push_back(hint);
     }
+
+    for (const auto& hint: CardinalityHints->Hints) {
+        if (!hint.Applied) {
+            res.push_back(hint.StringRepr);
+        }
+    }
+
+    return res;
 }
 
 } // namespace NYql

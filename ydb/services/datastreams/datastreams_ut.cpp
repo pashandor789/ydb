@@ -2758,7 +2758,7 @@ Y_UNIT_TEST_SUITE(DataStreams) {
 
         {
             ui64 txId = 107;
-            SplitPartition(*kikimr->GetRuntime(), txId, 1, "a");
+            NPQ::NTest::SplitPartition(*kikimr->GetRuntime(), txId, 1, "a");
         }
 
         {
@@ -2909,23 +2909,30 @@ Y_UNIT_TEST_SUITE(DataStreams) {
                 ).ExtractValueSync();
 
             UNIT_ASSERT_VALUES_EQUAL(result.IsTransportError(), false);
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::BAD_REQUEST, result.GetIssues().ToString());
+        }
+    }
+
+    Y_UNIT_TEST(Test_Crreate_AutoPartitioning_Disabled) {
+        TInsecureDatastreamsTestServer testServer(true);
+        SET_YDS_LOCALS;
+
+        {
+            auto result = testServer.DataStreamsClient->CreateStream("test-topic",
+                NYDS_V1::TCreateStreamSettings()
+                    .ShardCount(3)
+                    .BeginConfigurePartitioningSettings()
+                        .BeginConfigureAutoPartitioningSettings()
+                            .Strategy(NYdb::NDataStreams::V1::EAutoPartitioningStrategy::Disabled)
+                        .EndConfigureAutoPartitioningSettings()
+                    .EndConfigurePartitioningSettings()
+                ).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL(result.IsTransportError(), false);
             if (result.GetStatus() != EStatus::SUCCESS) {
                 result.GetIssues().PrintTo(Cerr);
             }
             UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
         }
-
-        {
-            auto result = testServer.DataStreamsClient->DescribeStream(streamName2).ExtractValueSync();
-            UNIT_ASSERT_VALUES_EQUAL(result.IsTransportError(), false);
-            Cerr << result.GetIssues().ToString() << "\n";
-            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
-
-            auto& d = result.GetResult().stream_description();
-            UNIT_ASSERT_VALUES_EQUAL(d.stream_status(), YDS_V1::StreamDescription::ACTIVE);
-            UNIT_ASSERT_VALUES_EQUAL(d.partitioning_settings().auto_partitioning_settings().strategy(), ::Ydb::DataStreams::V1::AutoPartitioningStrategy::AUTO_PARTITIONING_STRATEGY_DISABLED);
-        }
-
     }
 
 }

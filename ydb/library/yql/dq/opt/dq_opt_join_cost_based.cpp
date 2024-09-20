@@ -27,9 +27,9 @@ bool DqCollectJoinRelationsWithStats(
         auto input = equiJoin.Arg(i).Cast<TCoEquiJoinInput>();
         auto joinArg = input.List();
 
-        auto maybeStat = typesCtx.StatisticsMap.find(joinArg.Raw());
+        auto stats = typesCtx.GetStats(joinArg.Raw());
 
-        if (maybeStat == typesCtx.StatisticsMap.end()) {
+        if (!stats) {
             YQL_CLOG(TRACE, CoreDq) << "Didn't find statistics for scope " << input.Scope().Cast<TCoAtom>().StringValue() << "\n";
             return false;
         }
@@ -40,7 +40,6 @@ bool DqCollectJoinRelationsWithStats(
         }
 
         TStringBuf label = scope.Cast<TCoAtom>();
-        auto stats = maybeStat->second;
         collector(rels, label, joinArg.Ptr(), stats);
     }
     return true;
@@ -217,18 +216,17 @@ public:
 
     std::shared_ptr<TJoinOptimizerNode> JoinSearch(
         const std::shared_ptr<TJoinOptimizerNode>& joinTree, 
-        TCardinalityHints hints = {},
-        TJoinAlgoHints joinHints = {}
+        const TOptimizerHints& hints = {}
     ) override {
 
         auto relsCount = joinTree->Labels().size();
 
         if (relsCount <= 64) { // The algorithm is more efficient.
-            return JoinSearchImpl<TNodeSet64>(joinTree, hints, joinHints);
+            return JoinSearchImpl<TNodeSet64>(joinTree, hints);
         }
 
         if (64 < relsCount && relsCount <= 128) {
-            return JoinSearchImpl<TNodeSet128>(joinTree, hints, joinHints);
+            return JoinSearchImpl<TNodeSet128>(joinTree, hints);
         }
 
         ComputeStatistics(joinTree, this->Pctx);
@@ -242,11 +240,10 @@ private:
     template <typename TNodeSet>
     std::shared_ptr<TJoinOptimizerNode> JoinSearchImpl(
         const std::shared_ptr<TJoinOptimizerNode>& joinTree, 
-        TCardinalityHints hints = {},
-        TJoinAlgoHints joinHints = {}) {
-
-        TJoinHypergraph<TNodeSet> hypergraph = MakeJoinHypergraph<TNodeSet>(joinTree);
-        TDPHypSolver<TNodeSet> solver(hypergraph, this->Pctx, hints, joinHints);
+        const TOptimizerHints& hints = {}
+    ) {
+        TJoinHypergraph<TNodeSet> hypergraph = MakeJoinHypergraph<TNodeSet>(joinTree, hints);
+        TDPHypSolver<TNodeSet> solver(hypergraph, this->Pctx);
 
         if (solver.CountCC(MaxDPhypTableSize_) >= MaxDPhypTableSize_) {
             YQL_CLOG(TRACE, CoreDq) << "Maximum DPhyp threshold exceeded\n";
@@ -254,7 +251,7 @@ private:
             return joinTree;
         }
 
-        auto bestJoinOrder = solver.Solve();
+        auto bestJoinOrder = solver.Solve(hints);
         return ConvertFromInternal(bestJoinOrder);
     }
 private:
@@ -272,11 +269,10 @@ TExprBase DqOptimizeEquiJoinWithCosts(
     ui32 optLevel,
     IOptimizerNew& opt,
     const TProviderCollectFunction& providerCollect,
-    TCardinalityHints hints,
-    TJoinAlgoHints joinHints
+    const TOptimizerHints& hints
 ) {
     int dummyEquiJoinCounter = 0;
-    return DqOptimizeEquiJoinWithCosts(node, ctx, typesCtx, optLevel, opt, providerCollect, dummyEquiJoinCounter, hints, joinHints);
+    return DqOptimizeEquiJoinWithCosts(node, ctx, typesCtx, optLevel, opt, providerCollect, dummyEquiJoinCounter, hints);
 }
 
 TExprBase DqOptimizeEquiJoinWithCosts(
@@ -287,8 +283,7 @@ TExprBase DqOptimizeEquiJoinWithCosts(
     IOptimizerNew& opt,
     const TProviderCollectFunction& providerCollect,
     int& equiJoinCounter,
-    TCardinalityHints hints,
-    TJoinAlgoHints joinHints
+    const TOptimizerHints& hints
 ) {
     if (optLevel <= 1) {
         return node;
@@ -300,7 +295,7 @@ TExprBase DqOptimizeEquiJoinWithCosts(
     auto equiJoin = node.Cast<TCoEquiJoin>();
     YQL_ENSURE(equiJoin.ArgCount() >= 4);
 
-    if (typesCtx.StatisticsMap.contains(equiJoin.Raw())) {
+    if (typesCtx.ContainsStats(equiJoin.Raw())) {
         return node;
     }
 
@@ -318,6 +313,15 @@ TExprBase DqOptimizeEquiJoinWithCosts(
 
     YQL_CLOG(TRACE, CoreDq) << "All statistics for join in place";
 
+    bool allRowStorage = std::all_of(
+        rels.begin(), 
+        rels.end(), 
+        [](std::shared_ptr<TRelOptimizerNode>& r) {return r->Stats->StorageType==EStorageType::RowStorage; });
+
+    if (optLevel == 2 && allRowStorage) {
+        return node;
+    }
+
     equiJoinCounter++;
 
     auto joinTuple = equiJoin.Arg(equiJoin.ArgCount() - 2).Cast<TCoEquiJoinTuple>();
@@ -325,16 +329,16 @@ TExprBase DqOptimizeEquiJoinWithCosts(
     // Generate an initial tree
     auto joinTree = ConvertToJoinTree(joinTuple, rels);
 
-    if (NYql::NLog::YqlLogger().NeedToLog(NYql::NLog::EComponent::ProviderKqp, NYql::NLog::ELevel::TRACE)) {
+    if (NYql::NLog::YqlLogger().NeedToLog(NYql::NLog::EComponent::CoreDq, NYql::NLog::ELevel::TRACE)) {
         std::stringstream str;
         str << "Converted join tree:\n";
         joinTree->Print(str);
         YQL_CLOG(TRACE, CoreDq) << str.str();
     }
 
-    joinTree = opt.JoinSearch(joinTree, hints, joinHints);
+    joinTree = opt.JoinSearch(joinTree, hints);
 
-    if (NYql::NLog::YqlLogger().NeedToLog(NYql::NLog::EComponent::ProviderKqp, NYql::NLog::ELevel::TRACE)) {
+    if (NYql::NLog::YqlLogger().NeedToLog(NYql::NLog::EComponent::CoreDq, NYql::NLog::ELevel::TRACE)) {
         std::stringstream str;
         str << "Optimizied join tree:\n";
         joinTree->Print(str);
@@ -343,7 +347,7 @@ TExprBase DqOptimizeEquiJoinWithCosts(
 
     // rewrite the join tree and record the output statistics
     TExprBase res = RearrangeEquiJoinTree(ctx, equiJoin, joinTree);
-    typesCtx.StatisticsMap[res.Raw()] = joinTree->Stats;
+    typesCtx.SetStats(res.Raw(), joinTree->Stats);
     return res;
 
 }
