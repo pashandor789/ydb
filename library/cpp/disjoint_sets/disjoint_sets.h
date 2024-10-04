@@ -16,6 +16,8 @@ private:
     size_t NumberOfSets;
 
 public:
+    TDisjointSets() = default;
+    
     TDisjointSets(size_t setCount)
         : Parents(setCount)
         , Ranks(setCount, 0)

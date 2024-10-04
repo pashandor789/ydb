@@ -1,7 +1,8 @@
 #pragma once
 
-
 #include <numeric>
+#include <unordered_set>
+
 #include <util/string/join.h>
 #include <util/string/printf.h>
 #include "bitset.h"
@@ -14,6 +15,29 @@
 #include "dq_opt_conflict_rules_collector.h"
 
 namespace NYql::NDq {
+
+class TJoinColumnEquivalenceSet {
+public:
+    TJoinColumnEquivalenceSet() = default;
+
+    TJoinColumnEquivalenceSet(
+        THashMap<TJoinColumn, size_t, TJoinColumn::THashFunction> idByJoinCond,
+        TDisjointSets connectedComponents
+    )
+        : IdByJoinCond(std::move(idByJoinCond))
+        , ConnectedComponents(std::move(connectedComponents)) 
+    {}
+
+    bool IsOneSet(const TJoinColumn& lhs, const TJoinColumn& rhs) {
+        return 
+            ConnectedComponents.CanonicSetElement(IdByJoinCond[lhs]) == 
+            ConnectedComponents.CanonicSetElement(IdByJoinCond[rhs]);
+    }
+
+private:
+    THashMap<TJoinColumn, size_t, TJoinColumn::THashFunction> IdByJoinCond;
+    TDisjointSets ConnectedComponents;
+};
 
 /* 
  * JoinHypergraph - a graph, whose edge connects two sets of nodes.
@@ -75,11 +99,11 @@ public:
                 auto rightKey = right.AttributeName;
 
                 if (auto idx = leftKey.find_last_of('.'); idx != TString::npos) {
-                    leftKey =  leftKey.substr(idx+1);
+                    leftKey =  leftKey.substr(idx + 1);
                 }
 
                 if (auto idx = rightKey.find_last_of('.'); idx != TString::npos) {
-                    rightKey =  rightKey.substr(idx+1);
+                    rightKey =  rightKey.substr(idx + 1);
                 }
 
                 LeftJoinKeys.emplace_back(leftKey);
@@ -133,10 +157,21 @@ public:
             };
 
         for (const auto& edge: Edges_) {
+            TVector<TString> conds;
+            for (const auto& [lhsCond, rhsCond]: edge.JoinConditions) {
+                TString cond = Sprintf(
+                    "%s.%s = %s.%s",
+                    lhsCond.RelName.c_str(), lhsCond.AttributeName.c_str(), rhsCond.RelName.c_str(), rhsCond.AttributeName.c_str()
+                );
+
+                conds.push_back(std::move(cond));
+            }
+
             res 
                 .append(edgeSideToString(edge.Left))
                 .append(" -> ")
                 .append(edgeSideToString(edge.Right))
+                .append("\t").append(JoinSeq(", ", conds))
                 .append("\n");
         }
         
@@ -241,6 +276,45 @@ public:
         return nullptr;
     }
 
+    /* 
+     * There can be several edges between lhs and rhs, and some of them can contain redudant conditions (in one equivalence set).
+     */
+    TVector<const TEdge*> FindEdgesWithNonRedudantConditionsBetween(const TNodeSet& lhs, const TNodeSet& rhs) {
+        TVector<const TEdge*> resEdges;
+
+        for (const auto& edge: Edges_) {
+            if (
+                IsSubset(edge.Left, lhs) &&
+                !Overlaps(edge.Left, rhs) &&
+                IsSubset(edge.Right, rhs) &&
+                !Overlaps(edge.Right, lhs)
+            ) {
+                if (edge.JoinConditions.size() != 1) {
+                    resEdges.push_back(&edge);
+                    continue;
+                }
+
+                bool hasEquivalentCondition = false;
+                for (const auto& resEdge: resEdges) {
+                    if (resEdge->JoinConditions.size() != 1) {
+                        continue;
+                    }
+
+                    if (JoinColumnEquivalenceSet_.IsOneSet(edge.JoinConditions.begin()->first, resEdge->JoinConditions.begin()->first)) {
+                        hasEquivalentCondition = true;
+                        break;
+                    }
+                }
+
+                if (!hasEquivalentCondition) {
+                    resEdges.push_back(&edge);
+                }
+            }
+        }
+
+        return resEdges;
+    }
+
     void UpdateEdgeSides(size_t idx, TNodeSet newLeft, TNodeSet newRight) {
         auto& edge = Edges_[idx];
 
@@ -254,6 +328,9 @@ public:
         edge.Left = newLeft;
         edge.Right = newRight;
     }
+
+public:
+    void ConstructTransitiveClosure();
 
 private:
     /* Attach edges to nodes */
@@ -271,6 +348,8 @@ private:
         }
     }
 
+public:
+    TJoinColumnEquivalenceSet JoinColumnEquivalenceSet_;
 private:
     THashMap<TString, size_t> NodeIdByRelationName_;
 
@@ -367,15 +446,12 @@ private:
 /* 
  *  This class construct transitive closure between nodes in hypergraph. 
  *  Transitive closure means that if we have an edge from (1,2) with join
- *  condition R.A = S.A and we have an edge from (2,3) with join condition
- *  S.A = T.A, we will find out that the join conditions form an equivalence set
- *  and add an edge (1,3) with join condition R.A = T.A.
+ *  condition R.Z = S.A and we have an edge from (2,3) with join condition
+ *  S.A = T.V, we will find out that the join conditions form an equivalence set
+ *  and add an edge (1,3) with join condition R.Z = T.V.
  *  Algorithm works as follows:
- *      1) We leave only edges that do not conflict with themselves and 
- *      in join condition equality attributes on left and right side must be equal by name.
- *      (e.g. a.id = b.id && a.kek = b.kek)
- *      2) We group edges by attribute names in equality and joinKind
- *      3) In each group we build connected components and in each components we add missing edges. 
+ *      1) We leave only inner-join simple edges
+ *      2) We build connected components (by join conditions) and in each components we add missing edges. 
  */
 template <typename TNodeSet>
 class TTransitiveClosureConstructor {
@@ -392,108 +468,57 @@ public:
 
         EraseIf(
             edges, 
-            [this](const THyperedge& edge) {
-                return 
-                    edge.IsReversed || 
-                    !(IsJoinTransitiveClosureSupported(edge.JoinKind) && edge.AreCondVectorEqual()) ||
-                    edge.LeftAny || edge.RightAny;
+            [](const THyperedge& edge) {
+                return edge.IsReversed || !edge.IsSimple() || edge.JoinKind != InnerJoin || edge.LeftAny || edge.RightAny;
             }
         );
         
-        std::sort(
-            edges.begin(),
-            edges.end(),
-            [](const THyperedge& lhs, const THyperedge& rhs) {    
-                auto lhsAttributeNames = lhs.LeftJoinKeys;
-                auto rhsAttributeNames = rhs.LeftJoinKeys;
-
-                std::sort(lhsAttributeNames.begin(), lhsAttributeNames.end());
-                std::sort(rhsAttributeNames.begin(), rhsAttributeNames.end());
-
-                return 
-                    std::tie(lhsAttributeNames, lhs.JoinKind) < 
-                    std::tie(rhsAttributeNames, rhs.JoinKind);
-            }
-        );
-        
-        size_t groupBegin = 0;
-        for (size_t groupEnd = 0; groupEnd < edges.size();) {
-            while (groupEnd < edges.size() && HasOneGroup(edges[groupBegin], edges[groupEnd])) {
-                ++groupEnd;
-            }
-
-            if (groupEnd - groupBegin >= 2) {
-                ComputeTransitiveClosureInGroup(edges, groupBegin, groupEnd);
-            }
-
-            groupBegin = groupEnd;
-        }
+        ConstructImpl(edges);
     }
 
 private:
-    void ComputeTransitiveClosureInGroup(const TVector<THyperedge>& edges, size_t groupBegin, size_t groupEnd) {
-        size_t nodeSetSize = TNodeSet{}.size();
-        const auto& nodes = Graph_.GetNodes();
+    void ConstructImpl(const TVector<THyperedge>& edges) {
+        std::vector<TJoinColumn> joinCondById;
+        for (const auto& edge: edges) {
+            for (const auto& [lhs, rhs]: edge.JoinConditions) {
+                joinCondById.push_back(lhs);
+                joinCondById.push_back(rhs);
+            }
+        }
+        std::sort(joinCondById.begin(), joinCondById.end());
+        joinCondById.erase(std::unique(joinCondById.begin(), joinCondById.end()), joinCondById.end());
 
-        EJoinKind groupJoinKind = edges[groupBegin].JoinKind;
-        bool isJoinCommutative = edges[groupBegin].IsCommutative;
-
-        TVector<TString> groupConditionUsedAttributes;
-        for (const auto& [lhs, rhs]:  edges[groupBegin].JoinConditions) {
-            groupConditionUsedAttributes.push_back(lhs.AttributeName);
+        THashMap<TJoinColumn, size_t, TJoinColumn::THashFunction> idByJoinCond;
+        for (size_t i = 0; i < joinCondById.size(); ++i) {
+            idByJoinCond[joinCondById[i]] = i;
         }
 
-        TDisjointSets connectedComponents(nodeSetSize);
-        for (size_t edgeId = groupBegin; edgeId < groupEnd; ++edgeId) {
-            const auto& edge = edges[edgeId];
-            connectedComponents.UnionSets(GetLowestSetBit(edge.Left), GetLowestSetBit(edge.Right));
+        TDisjointSets connectedComponents(joinCondById.size());
+        for (const auto& edge: edges) {
+            for (const auto& [lhs, rhs]: edge.JoinConditions) {
+                connectedComponents.UnionSets(idByJoinCond[lhs], idByJoinCond[rhs]);
+            }
         }
 
-        for (size_t i = 0; i < nodeSetSize; ++i) {
+        for (size_t i = 0; i < joinCondById.size(); ++i) {
             for (size_t j = 0; j < i; ++j) {
                 auto iGroup = connectedComponents.CanonicSetElement(i);
                 auto jGroup = connectedComponents.CanonicSetElement(j);
                 if (iGroup == jGroup) {
-                    TNodeSet lhs; lhs[i] = 1;
-                    TNodeSet rhs; rhs[j] = 1;
+                    auto iNode = Graph_.GetNodesByRelNames({joinCondById[i].RelName});
+                    auto jNode = Graph_.GetNodesByRelNames({joinCondById[j].RelName});
 
-                    const auto* edge = Graph_.FindEdgeBetween(lhs, rhs);
-                    if (edge != nullptr) {
-                        continue;
+                    if (Graph_.FindEdgeBetween(iNode, jNode)) {
+                        continue; 
                     }
 
-                    TString lhsRelName = nodes[i].RelationOptimizerNode->Labels()[0];
-                    TString rhsRelName = nodes[j].RelationOptimizerNode->Labels()[0];
-                    std::set<std::pair<TJoinColumn, TJoinColumn>> joinConditions;
-                    for (const auto& attributeName: groupConditionUsedAttributes){
-                        joinConditions.insert({
-                            TJoinColumn(lhsRelName, attributeName), 
-                            TJoinColumn(rhsRelName, attributeName)
-                        });
-                    }
-
-                    auto e = THyperedge(lhs, rhs, groupJoinKind, false, false, isJoinCommutative, joinConditions);
-                    Graph_.AddEdge(std::move(e));
+                    Graph_.AddEdge(THyperedge(iNode, jNode, InnerJoin, false, false, true, {{joinCondById[i], joinCondById[j]}}));
                 }
             }
         }
-    }
 
-    bool HasOneGroup(const THyperedge& lhs, const THyperedge& rhs) {
-        auto lhsAttributeNames = lhs.LeftJoinKeys;
-        auto rhsAttributeNames = rhs.LeftJoinKeys;
-
-        std::sort(lhsAttributeNames.begin(), lhsAttributeNames.end());
-        std::sort(rhsAttributeNames.begin(), rhsAttributeNames.end());
-
-        return lhsAttributeNames == rhsAttributeNames && lhs.JoinKind == rhs.JoinKind;
-    }
-
-    bool IsJoinTransitiveClosureSupported(EJoinKind joinKind)  {
-        return 
-            OperatorsAreAssociative(joinKind, joinKind) &&
-            OperatorsAreLeftAsscom(joinKind, joinKind) &&
-            OperatorsAreRightAsscom(joinKind, joinKind);
+        Graph_.JoinColumnEquivalenceSet_ = TJoinColumnEquivalenceSet(std::move(idByJoinCond), std::move(connectedComponents));
+        // return TJoinColumnEquivalenceSet(std::move(idByJoinCond), std::move(connectedComponents));
     }
 
 private:
