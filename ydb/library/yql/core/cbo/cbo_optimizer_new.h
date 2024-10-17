@@ -207,12 +207,14 @@ struct IProviderContext {
         EJoinKind joinKind,
         TCardinalityHints::TCardinalityHint* maybeHint = nullptr) const = 0;
 
-    virtual bool IsJoinApplicable(const std::shared_ptr<IBaseOptimizerNode>& left,
-        const std::shared_ptr<IBaseOptimizerNode>& right,
+    virtual bool IsJoinApplicable(
+        const TOptimizerStatistics& leftStats,
+        const TOptimizerStatistics& rightStats,
         const TVector<NDq::TJoinColumn>& leftJoinKeys,
         const TVector<NDq::TJoinColumn>& rightJoinKeys,
         EJoinAlgoType joinAlgo,
-        EJoinKind joinKin) = 0;
+        EJoinKind joinKind
+    ) = 0;
 };
 
 /**
@@ -225,8 +227,8 @@ struct TBaseProviderContext : public IProviderContext {
     double ComputeJoinCost(const TOptimizerStatistics& leftStats, const TOptimizerStatistics& rightStats, const double outputRows, const double outputByteSize, EJoinAlgoType joinAlgo) const override;
 
     bool IsJoinApplicable(
-        const std::shared_ptr<IBaseOptimizerNode>& leftStats,
-        const std::shared_ptr<IBaseOptimizerNode>& rightStats,
+        const TOptimizerStatistics& leftStats,
+        const TOptimizerStatistics& rightStats,
         const TVector<NDq::TJoinColumn>& leftJoinKeys,
         const TVector<NDq::TJoinColumn>& rightJoinKeys,
         EJoinAlgoType joinAlgo,
@@ -251,13 +253,11 @@ struct TBaseProviderContext : public IProviderContext {
 struct TRelOptimizerNode : public IBaseOptimizerNode {
     TString Label;
 
-    // Temporary solution to check if a LookupJoin is possible in KQP
-    //void* Expr;
+    TRelOptimizerNode(TString label, std::shared_ptr<TOptimizerStatistics> stats) 
+        : IBaseOptimizerNode(RelNodeType, stats)
+        , Label(label) 
+    {}
 
-    TRelOptimizerNode(TString label, std::shared_ptr<TOptimizerStatistics> stats) :
-        IBaseOptimizerNode(RelNodeType, stats), Label(label) { }
-    //TRelOptimizerNode(TString label, std::shared_ptr<TOptimizerStatistics> stats, const TExprNode::TPtr expr) :
-    //    IBaseOptimizerNode(RelNodeType, stats), Label(label), Expr(expr) { }
     virtual ~TRelOptimizerNode() {}
 
     virtual TVector<TString> Labels();

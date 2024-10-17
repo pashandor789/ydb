@@ -4,6 +4,28 @@
 
 namespace NYql::NDq {
 
+struct IBaseOptimizerNodeInternal {
+    TOptimizerStatistics Stats;
+    EOptimizerNodeKind Kind;
+
+    virtual ~IBaseOptimizerNodeInternal() = default;
+};
+
+
+struct TRelOptimizerNodeInternal : public IBaseOptimizerNodeInternal {
+    TRelOptimizerNodeInternal(
+        const TOptimizerStatistics& stats,
+        TString label 
+    ) 
+        : Label(std::move(label))
+    {
+        Stats = stats;
+        Kind = EOptimizerNodeKind::RelNodeType;
+    }
+
+    TString Label;
+};
+
 /**
  * Internal Join nodes are used inside the CBO. They don't own join condition data structures
  * and therefore avoid copying them during generation of candidate plans.
@@ -14,10 +36,11 @@ namespace NYql::NDq {
  * After join enumeration, internal nodes need to be converted to regular nodes, that own the data
  * structures
 */
-struct TJoinOptimizerNodeInternal : public IBaseOptimizerNode {
+struct TJoinOptimizerNodeInternal : public IBaseOptimizerNodeInternal {
     TJoinOptimizerNodeInternal(
-        const std::shared_ptr<IBaseOptimizerNode>& left, 
-        const std::shared_ptr<IBaseOptimizerNode>& right,
+        TOptimizerStatistics&& stats,
+        const std::shared_ptr<IBaseOptimizerNodeInternal>& left, 
+        const std::shared_ptr<IBaseOptimizerNodeInternal>& right,
         const TVector<TJoinColumn>& leftJoinKeys,
         const TVector<TJoinColumn>& rightJoinKeys, 
         const EJoinKind joinType, 
@@ -25,8 +48,7 @@ struct TJoinOptimizerNodeInternal : public IBaseOptimizerNode {
         const bool leftAny,
         const bool rightAny
     ) 
-        : IBaseOptimizerNode(JoinNodeType)
-        , LeftArg(left)
+        : LeftArg(left)
         , RightArg(right)
         , LeftJoinKeys(leftJoinKeys)
         , RightJoinKeys(rightJoinKeys)
@@ -34,21 +56,15 @@ struct TJoinOptimizerNodeInternal : public IBaseOptimizerNode {
         , JoinAlgo(joinAlgo)
         , LeftAny(leftAny)
         , RightAny(rightAny)
-    {}
+    {
+        Stats = std::move(stats);
+        Kind = EOptimizerNodeKind::JoinNodeType;
+    }
 
     virtual ~TJoinOptimizerNodeInternal() = default;
-    virtual TVector<TString> Labels() {
-        auto res = LeftArg->Labels();
-        auto rightLabels = RightArg->Labels();
-        res.insert(res.begin(),rightLabels.begin(),rightLabels.end());
-        return res;
-    }
 
-    virtual void Print(std::stringstream&, int) {
-    }
-
-    std::shared_ptr<IBaseOptimizerNode> LeftArg;
-    std::shared_ptr<IBaseOptimizerNode> RightArg;
+    std::shared_ptr<IBaseOptimizerNodeInternal> LeftArg;
+    std::shared_ptr<IBaseOptimizerNodeInternal> RightArg;
     const TVector<TJoinColumn>& LeftJoinKeys;
     const TVector<TJoinColumn>& RightJoinKeys;
     EJoinKind JoinType;
@@ -61,16 +77,15 @@ struct TJoinOptimizerNodeInternal : public IBaseOptimizerNode {
  * Create a new internal join node and compute its statistics and cost
 */
 std::shared_ptr<TJoinOptimizerNodeInternal> MakeJoinInternal(
-    std::shared_ptr<IBaseOptimizerNode> left,
-    std::shared_ptr<IBaseOptimizerNode> right,
+    TOptimizerStatistics&& stats,
+    const std::shared_ptr<IBaseOptimizerNodeInternal>& left,
+    const std::shared_ptr<IBaseOptimizerNodeInternal>& right,
     const TVector<TJoinColumn>& leftJoinKeys,
     const TVector<TJoinColumn>& rightJoinKeys,
     EJoinKind joinKind,
     EJoinAlgoType joinAlgo,
     bool leftAny,
-    bool rightAny,
-    IProviderContext& ctx,
-    TCardinalityHints::TCardinalityHint* maybeHint = nullptr
+    bool rightAny
 );
 
 /**
@@ -80,6 +95,6 @@ std::shared_ptr<TJoinOptimizerNodeInternal> MakeJoinInternal(
  * separately if the plan contains non-orderable joins). So we check the instances and if we encounter
  * an external node, we return the whole subtree unchanged.
 */
-std::shared_ptr<TJoinOptimizerNode> ConvertFromInternal(const std::shared_ptr<IBaseOptimizerNode> internal);
+std::shared_ptr<IBaseOptimizerNode> ConvertFromInternal(const std::shared_ptr<IBaseOptimizerNodeInternal>& internal);
 
 } // namespace NYql::NDq

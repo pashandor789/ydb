@@ -149,15 +149,17 @@ bool IsPKJoin(const TOptimizerStatistics& stats, const TVector<TJoinColumn>& joi
     return true;
 }
 
-bool TBaseProviderContext::IsJoinApplicable(const std::shared_ptr<IBaseOptimizerNode>& left,
-    const std::shared_ptr<IBaseOptimizerNode>& right,
+bool TBaseProviderContext::IsJoinApplicable(
+    const TOptimizerStatistics& leftStats,
+    const TOptimizerStatistics& rightStats,
     const TVector<TJoinColumn>& leftJoinKeys,
     const TVector<TJoinColumn>& rightJoinKeys,
     EJoinAlgoType joinAlgo,
-    EJoinKind joinKind) {
+    EJoinKind joinKind
+) {
 
-    Y_UNUSED(left);
-    Y_UNUSED(right);
+    Y_UNUSED(leftStats);
+    Y_UNUSED(rightStats);
     Y_UNUSED(leftJoinKeys);
     Y_UNUSED(rightJoinKeys);
     Y_UNUSED(joinKind);

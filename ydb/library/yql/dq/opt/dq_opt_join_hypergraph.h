@@ -15,6 +15,7 @@
 
 
 #include "dq_opt_conflict_rules_collector.h"
+#include "dq_opt_join_tree_node.h"
 
 namespace NYql::NDq {
 
@@ -91,7 +92,7 @@ public:
     struct TNode {
         TNodeSet SimpleNeighborhood;
         TVector<size_t> ComplexEdgesId;
-        std::shared_ptr<IBaseOptimizerNode> RelationOptimizerNode;
+        std::shared_ptr<TRelOptimizerNodeInternal> RelationOptimizerNode;
     };
 
 public:
@@ -162,7 +163,7 @@ public:
         NodeIdByRelationName_.insert({relationNode->Labels()[0], nodeId});
 
         Nodes_.push_back({});
-        Nodes_.back().RelationOptimizerNode = relationNode;
+        Nodes_.back().RelationOptimizerNode = std::make_shared<TRelOptimizerNodeInternal>(*relationNode->Stats, relationNode->Labels()[0]);
 
         return nodeId;
     }

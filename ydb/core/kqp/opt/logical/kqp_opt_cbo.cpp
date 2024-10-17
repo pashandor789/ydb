@@ -139,12 +139,14 @@ bool IsLookupJoinApplicable(std::shared_ptr<IBaseOptimizerNode> left,
 
 }
 
-bool TKqpProviderContext::IsJoinApplicable(const std::shared_ptr<IBaseOptimizerNode>& left, 
-    const std::shared_ptr<IBaseOptimizerNode>& right, 
+bool TKqpProviderContext::IsJoinApplicable(
+    const std::shared_ptr<IBaseOptimizerNodeInternal>& left, 
+    const std::shared_ptr<IBaseOptimizerNodeInternal>& right, 
     const TVector<TJoinColumn>& leftJoinKeys,
     const TVector<TJoinColumn>& rightJoinKeys,
     EJoinAlgoType joinAlgo,
-    EJoinKind joinKind) {
+    EJoinKind joinKind
+) {
 
     switch( joinAlgo ) {
         case EJoinAlgoType::LookupJoin:

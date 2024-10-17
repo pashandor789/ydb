@@ -71,8 +71,11 @@ struct TOptimizerStatistics {
     std::shared_ptr<const IProviderStatistics> Specific;
     std::shared_ptr<TVector<TString>> Labels = {};
 
+    TOptimizerStatistics& operator=(const TOptimizerStatistics&) = default;
+    TOptimizerStatistics& operator=(TOptimizerStatistics&&) = default;
     TOptimizerStatistics(TOptimizerStatistics&&) = default;
-    TOptimizerStatistics() {}
+    TOptimizerStatistics(const TOptimizerStatistics&) = default;
+    TOptimizerStatistics() = default;
 
     TOptimizerStatistics(
         EStatisticsType type,
@@ -83,7 +86,8 @@ struct TOptimizerStatistics {
         TIntrusivePtr<TKeyColumns> keyColumns = {},
         TIntrusivePtr<TColumnStatMap> columnMap = {},
         EStorageType storageType = EStorageType::NA,
-        std::shared_ptr<const IProviderStatistics> specific = nullptr);
+        std::shared_ptr<const IProviderStatistics> specific = nullptr
+    );
 
     TOptimizerStatistics& operator+=(const TOptimizerStatistics& other);
     bool Empty() const;

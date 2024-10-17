@@ -81,8 +81,8 @@ private:
     // Iterate over all join algorithms and pick the best join that is applicable.
     // Also considers commuting joins
     std::shared_ptr<TJoinOptimizerNodeInternal> PickBestJoin(
-        const std::shared_ptr<IBaseOptimizerNode>& left,
-        const std::shared_ptr<IBaseOptimizerNode>& right,
+        const std::shared_ptr<IBaseOptimizerNodeInternal>& left,
+        const std::shared_ptr<IBaseOptimizerNodeInternal>& right,
         EJoinKind joinKind,
         bool leftAny,
         bool rightAny,
@@ -106,7 +106,7 @@ private:
         THashMap<std::pair<TNodeSet, TNodeSet>, bool, pair_hash> CheckTable_;
     #endif
 private:
-    THashMap<TNodeSet, std::shared_ptr<IBaseOptimizerNode>, std::hash<TNodeSet>> DpTable_;
+    THashMap<TNodeSet, std::shared_ptr<IBaseOptimizerNodeInternal>, std::hash<TNodeSet>> DpTable_;
     THashMap<TNodeSet, TCardinalityHints::TCardinalityHint*, std::hash<TNodeSet>> CardHintsTable_;
     THashMap<TNodeSet, TJoinAlgoHints::TJoinAlgoHint*, std::hash<TNodeSet>> JoinAlgoHintsTable_;
 };
@@ -244,7 +244,7 @@ template<typename TNodeSet> std::shared_ptr<TJoinOptimizerNodeInternal> TDPHypSo
         s[i] = 1;
         DpTable_[s] = nodes[i].RelationOptimizerNode;
         if (CardHintsTable_.contains(s)){
-            DpTable_[s]->Stats->Nrows = CardHintsTable_.at(s)->ApplyHint(DpTable_[s]->Stats->Nrows);
+            DpTable_[s]->Stats.Nrows = CardHintsTable_.at(s)->ApplyHint(DpTable_[s]->Stats.Nrows);
         }
     }
 
@@ -409,8 +409,8 @@ template <typename TNodeSet> TNodeSet TDPHypSolver<TNodeSet>::MakeB(const TNodeS
 }
 
 template <typename TNodeSet> std::shared_ptr<TJoinOptimizerNodeInternal> TDPHypSolver<TNodeSet>::PickBestJoin(
-    const std::shared_ptr<IBaseOptimizerNode>& left,
-    const std::shared_ptr<IBaseOptimizerNode>& right,
+    const std::shared_ptr<IBaseOptimizerNodeInternal>& left,
+    const std::shared_ptr<IBaseOptimizerNodeInternal>& right,
     EJoinKind joinKind,
     bool leftAny,
     bool rightAny,
@@ -423,30 +423,34 @@ template <typename TNodeSet> std::shared_ptr<TJoinOptimizerNodeInternal> TDPHypS
 ) {
     if (maybeJoinAlgoHint) {
         maybeJoinAlgoHint->Applied = true;
-        return MakeJoinInternal(left, right, leftJoinKeys, rightJoinKeys, joinKind, maybeJoinAlgoHint->Algo, leftAny, rightAny, ctx, maybeCardHint);
+        auto stats = ctx.ComputeJoinStats(left->Stats, right->Stats, leftJoinKeys, rightJoinKeys, maybeJoinAlgoHint->Algo, joinKind, maybeCardHint);;
+        return MakeJoinInternal(std::move(stats), left, right, leftJoinKeys, rightJoinKeys, joinKind, maybeJoinAlgoHint->Algo, leftAny, rightAny);
     }
-
+    
+    TOptimizerStatistics bestJoinStats;
     double bestCost = std::numeric_limits<double>::infinity();
     EJoinAlgoType bestAlgo = EJoinAlgoType::Undefined;
     bool bestJoinIsReversed = false;
 
     for (auto joinAlgo : AllJoinAlgos) {
-        if (ctx.IsJoinApplicable(left, right, leftJoinKeys, rightJoinKeys, joinAlgo, joinKind)){
-            auto cost = ctx.ComputeJoinStats(*left->Stats, *right->Stats, leftJoinKeys, rightJoinKeys, joinAlgo, joinKind, maybeCardHint).Cost;
-            if (cost < bestCost) {
-                bestCost = cost;
+        if (ctx.IsJoinApplicable(left->Stats, right->Stats, leftJoinKeys, rightJoinKeys, joinAlgo, joinKind)){
+            auto stats = ctx.ComputeJoinStats(left->Stats, right->Stats, leftJoinKeys, rightJoinKeys, joinAlgo, joinKind, maybeCardHint);
+            if (stats.Cost <= bestCost) {
+                bestCost = stats.Cost;
                 bestAlgo = joinAlgo;
                 bestJoinIsReversed = false;
+                bestJoinStats = std::move(stats);
             }
         }
 
         if (isCommutative) {
-            if (ctx.IsJoinApplicable(right, left, rightJoinKeys, leftJoinKeys, joinAlgo, joinKind)){
-                auto cost = ctx.ComputeJoinStats(*right->Stats, *left->Stats,  rightJoinKeys, leftJoinKeys, joinAlgo, joinKind, maybeCardHint).Cost;
-                if (cost < bestCost) {
-                    bestCost = cost;
+            if (ctx.IsJoinApplicable(right->Stats, left->Stats, rightJoinKeys, leftJoinKeys, joinAlgo, joinKind)){
+                auto stats = ctx.ComputeJoinStats(right->Stats, left->Stats,  rightJoinKeys, leftJoinKeys, joinAlgo, joinKind, maybeCardHint);
+                if (stats.Cost <= bestCost) {
+                    bestCost = stats.Cost;
                     bestAlgo = joinAlgo;
                     bestJoinIsReversed = true;
+                    bestJoinStats = std::move(stats);
                 }
             }
         }
@@ -455,10 +459,10 @@ template <typename TNodeSet> std::shared_ptr<TJoinOptimizerNodeInternal> TDPHypS
     Y_ENSURE(bestAlgo != EJoinAlgoType::Undefined, "No join was chosen!");
 
     if (bestJoinIsReversed) {
-        return MakeJoinInternal(right, left, rightJoinKeys, leftJoinKeys, joinKind, bestAlgo, rightAny, leftAny, ctx, maybeCardHint);
+        return MakeJoinInternal(std::move(bestJoinStats), right, left, rightJoinKeys, leftJoinKeys, joinKind, bestAlgo, rightAny, leftAny);
     }
     
-    return MakeJoinInternal(left, right, leftJoinKeys, rightJoinKeys, joinKind, bestAlgo, leftAny, rightAny, ctx, maybeCardHint);
+    return MakeJoinInternal(std::move(bestJoinStats), left, right, leftJoinKeys, rightJoinKeys, joinKind, bestAlgo, leftAny, rightAny);
 }
 
 /* 
@@ -503,7 +507,7 @@ template<typename TNodeSet> void TDPHypSolver<TNodeSet>::EmitCsgCmp(
         maybeJoinAlgoHint
     );
 
-    if (!DpTable_.contains(joined) || bestJoin->Stats->Cost < DpTable_[joined]->Stats->Cost) {
+    if (!DpTable_.contains(joined) || bestJoin->Stats.Cost < DpTable_[joined]->Stats.Cost) {
         DpTable_[joined] = bestJoin;
     }
 

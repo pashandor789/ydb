@@ -281,7 +281,9 @@ private:
         auto bestJoinOrder = solver.Solve(hints);
         auto resTree = ConvertFromInternal(bestJoinOrder);
         AddMissingConditions(hypergraph, resTree);
-        return resTree;
+
+        Y_ENSURE(resTree->Kind == EOptimizerNodeKind::JoinNodeType);
+        return std::static_pointer_cast<TJoinOptimizerNode>(resTree);
     }
 
     /* Due to cycles we can miss some conditions in edges, because DPHyp enumerates trees */

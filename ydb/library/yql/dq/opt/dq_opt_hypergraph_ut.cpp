@@ -8,6 +8,7 @@
 #include "dq_opt_make_join_hypergraph.h"
 #include "dq_opt_log.h"
 
+#include <iostream>
 #include <memory>
 
 using namespace NYql;
@@ -35,7 +36,20 @@ std::shared_ptr<IBaseOptimizerNode> CreateChain(size_t size, TString onAttribute
     return root;
 }
 
-template <typename TProviderContext = TBaseProviderContext>
+struct TTestContext : public TBaseProviderContext {
+    bool IsJoinApplicable(
+        const TOptimizerStatistics& ,
+        const TOptimizerStatistics& ,
+        const TVector<NDq::TJoinColumn>& ,
+        const TVector<NDq::TJoinColumn>& ,
+        EJoinAlgoType ,
+        EJoinKind 
+    ) override {
+        return true;
+    }
+};
+
+template <typename TProviderContext = TTestContext>
 std::shared_ptr<IBaseOptimizerNode> Enumerate(const std::shared_ptr<IBaseOptimizerNode>& root, const TOptimizerHints& hints = {}) {
     auto ctx = TProviderContext();
     auto optimizer = 
@@ -485,37 +499,55 @@ Y_UNIT_TEST_SUITE(HypergraphBuild) {
 
     Y_UNIT_TEST(JoinTopologiesBenchmark) {
         #ifndef NDEBUG
-            enum { CliqueSize = 11, ChainSize = 71, StarSize = 15 };
+            enum : ui64 { CliqueSize = 11, ChainSize = 71, StarSize = 15 };
         #else
-            enum { CliqueSize = 15, ChainSize = 165, StarSize = 20 };
+            enum : ui64 { CliqueSize = 15, ChainSize = 165, StarSize = 20 };
         #endif
 
-        {
-            size_t cliqueSize = CliqueSize;
-            auto startClique = std::chrono::high_resolution_clock::now();
-            Enumerate(MakeClique(cliqueSize));
-            auto endClique = std::chrono::high_resolution_clock::now();
-            std::chrono::duration<double> durationClique = endClique - startClique;
-            std::cerr << Sprintf("Time for Enumerate(MakeClique(%ld)): %f seconds", cliqueSize, durationClique.count()) << std::endl;
+        TVector<double> cliqueTime{};
+        TVector<double> starTime{};
+        TVector<double> chainTime{};
+
+        for (size_t i = 0; i < 5; ++i) {
+            {
+                auto startClique = std::chrono::high_resolution_clock::now();
+                Enumerate(MakeClique(CliqueSize));
+                auto endClique = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double> durationClique = endClique - startClique;
+                cliqueTime.push_back(durationClique.count());
+            }
+
+            {
+                auto startStar = std::chrono::high_resolution_clock::now();
+                Enumerate(MakeStar(StarSize));
+                auto endStar = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double> durationStar = endStar - startStar;
+                starTime.push_back(durationStar.count());
+            }
+
+            {
+                auto startChain = std::chrono::high_resolution_clock::now();
+                Enumerate(MakeChain(ChainSize));
+                auto endChain = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double> durationChain = endChain - startChain;
+                chainTime.push_back(durationChain.count());
+            }
         }
 
-        {
-            size_t starSize = StarSize;
-            auto startStar = std::chrono::high_resolution_clock::now();
-            Enumerate(MakeStar(starSize));
-            auto endStar = std::chrono::high_resolution_clock::now();
-            std::chrono::duration<double> durationStar = endStar - startStar;
-            std::cerr << Sprintf("Time for Enumerate(MakeStar(%ld)): %f seconds", starSize, durationStar.count()) << std::endl;
-        }
+        auto toString = [](const TVector<double>& v) -> TVector<TString> {
+            TVector<TString> res;
+            for (auto el: v) { res.push_back(ToString(el)); }
+            return res;
+        };
 
-        {
-            size_t chainSize = ChainSize;
-            auto startChain = std::chrono::high_resolution_clock::now();
-            Enumerate(MakeChain(chainSize));
-            auto endChain = std::chrono::high_resolution_clock::now();
-            std::chrono::duration<double> durationChain = endChain - startChain;
-            std::cerr << Sprintf("Time for Enumerate(MakeChain(%ld)): %f seconds", chainSize, durationChain.count()) << std::endl;
-        }
+        auto mean = [](const TVector<double>& v) -> double { 
+            double sum = std::accumulate(v.begin(), v.end(), 0.0);
+            return sum / static_cast<double>(v.size());
+        };
+
+        std::cerr << Sprintf("Time for Enumerate(MakeClique(%ld)): mean: %f, values: [%s] seconds ", CliqueSize, mean(cliqueTime), JoinSeq(",", toString(cliqueTime)).c_str()) << std::endl;
+        std::cerr << Sprintf("Time for Enumerate(MakeStar(%ld)): mean: %f, values: [%s] seconds", StarSize, mean(starTime), JoinSeq(",", toString(starTime)).c_str()) << std::endl;
+        std::cerr << Sprintf("Time for Enumerate(MakeChain(%ld)): mean: %f, values [%s] seconds", ChainSize, mean(chainTime), JoinSeq(",", toString(chainTime)).c_str()) << std::endl;
     }
-
 }
+
