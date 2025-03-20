@@ -1536,6 +1536,7 @@ protected:
         const ui64 /*nodeId*/,
         bool enableShuffleElimination = false
     ) const {
+        Y_UNUSED(enableShuffleElimination);
         ui32 result = 0;
         if (isOlapScan) {
             if (AggregationSettings.HasCSScanThreadsPerNode()) {
@@ -1555,11 +1556,6 @@ protected:
             }
         }
         result = Max<ui32>(1, result);
-
-        if (enableShuffleElimination) {
-            result *= 2;
-        }
-
         return result;
     }
 
